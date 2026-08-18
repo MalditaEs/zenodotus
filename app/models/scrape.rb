@@ -30,35 +30,64 @@ class Scrape < ApplicationRecord
     ScrapeJob.perform_later(self)
   end
 
-  # Make the call to Hypatia, the return should be { success: "true" } after parsing
-  # This does it synchronously. If you're calling this you probably mean to call `enqueue`
+  # Kicks the scrape off synchronously (you probably want `enqueue`). The return is the
+  # parsed server response ({ success: true } from Hypatia; the ack from the orchestrator).
+  # By default this GETs Hypatia (legacy). When the MV-6 orchestrator
+  # (Mitropoulos) is enabled via a feature flag, it POSTs JSON to the orchestrator instead.
+  # Either way the response handling is identical: a 400 {code:10} means the url is
+  # unsupported (mark removed, don't retry); any other non-2xx is an error we retry.
   sig { returns(Hash) }
   def perform
-    params = { url: { auth_key: Figaro.env.HYPATIA_AUTH_KEY, url: self.url, callback_id: self.id } }
+    response = orchestrator_enabled? ? perform_via_orchestrator : perform_via_hypatia
 
-    # Move this to the Scrape model so they're easily resubmittable
-    response = Typhoeus.get(
-      Figaro.env.HYPATIA_SERVER_URL,
-      followlocation: true,
-      params: params,
-      ssl_verifypeer: false,
-      ssl_verifyhost: 0
-    )
-
-    json_error_response = JSON.parse(response.body)
-    if response.code != 200
-      if response.code == 400 && json_error_response.nil? == false && json_error_response["code"] == 10
+    if (200..299).exclude?(response.code)
+      json_error_response = JSON.parse(response.body) rescue nil
+      if response.code == 400 && json_error_response.is_a?(Hash) && json_error_response["code"] == 10
         logger.info("Marking: #{self.url} as removed. 🦕")
         # The url is not valid, so we should mark it as removed
         self.fulfill([{ status: "removed" }])
         # We don't raise because we don't want it to retry.
       else
         self.mark_error
-        raise Scrape::ExternalServerError.new("Error: #{response.code} returned from Hypatia server.")
+        raise Scrape::ExternalServerError.new("Error: #{response.code} returned from scrape server.")
       end
     end
 
     JSON.parse(response.body)
+  end
+
+  # Feature flag for the MV-6 cutover. Off by default; the legacy Hypatia path runs unless
+  # both USE_ORCHESTRATOR=true and MITROPOULOS_URL are set, so rollback is one env var.
+  def orchestrator_enabled?
+    Figaro.env.USE_ORCHESTRATOR == "true" && Figaro.env.MITROPOULOS_URL.present?
+  end
+
+  # Legacy path: GET Hypatia with nested `url[...]` params.
+  def perform_via_hypatia
+    params = { url: { auth_key: Figaro.env.HYPATIA_AUTH_KEY, url: self.url, callback_id: self.id } }
+    Typhoeus.get(
+      Figaro.env.HYPATIA_SERVER_URL,
+      followlocation: true,
+      params: params,
+      ssl_verifypeer: false,
+      ssl_verifyhost: 0
+    )
+  end
+
+  # MV-6 path: POST JSON to the orchestrator. It answers 202 (queued) and later calls back
+  # the same /media_vault/archive/scrape_result_callback, and reproduces the 400 {code:10}
+  # unsupported-url contract, so the handling in `perform` is unchanged. callback_id is sent
+  # as a string (the orchestrator echoes it back verbatim in the callback).
+  def perform_via_orchestrator
+    headers = { "Content-Type" => "application/json" }
+    if Figaro.env.MITROPOULOS_AUTH_KEY.present?
+      headers["Authorization"] = "Bearer #{Figaro.env.MITROPOULOS_AUTH_KEY}"
+    end
+    Typhoeus.post(
+      "#{Figaro.env.MITROPOULOS_URL.chomp('/')}/scrape",
+      headers: headers,
+      body: { url: self.url, callback_id: self.id.to_s }.to_json
+    )
   end
 
   sig { void }
