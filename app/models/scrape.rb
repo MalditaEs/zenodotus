@@ -75,7 +75,7 @@ class Scrape < ApplicationRecord
   end
 
   # MV-6 path: POST JSON to the orchestrator. It answers 202 (queued) and later calls back
-  # the same /media_vault/archive/scrape_result_callback, and reproduces the 400 {code:10}
+  # the same archive#scrape_result_callback endpoint, and reproduces the 400 {code:10}
   # unsupported-url contract, so the handling in `perform` is unchanged. callback_id is sent
   # as a string (the orchestrator echoes it back verbatim in the callback).
   def perform_via_orchestrator
