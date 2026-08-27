@@ -1,0 +1,54 @@
+# Staging overlay for the MV-6 orchestrator cutover.
+#
+# Production runs Postgres and Neo4j externally; this overlay brings them in-stack, fully
+# isolated (own volumes), so a staging Zenodotus never touches production data. Run with a
+# dedicated project name so networks/volumes/containers are separate from anything else:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml \
+#     -p zenodotus-staging up -d --build
+#
+# The web service has RUN_MIGRATIONS=true, so it migrates the fresh DB on first boot.
+services:
+  db:
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: zenodotus_production
+    volumes:
+      - staging-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5
+    restart: always
+    environment:
+      NEO4J_AUTH: neo4j/password # matches NEO4J_PASSWORD in the base compose
+    volumes:
+      - staging-neo4jdata:/data
+
+  web:
+    depends_on:
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      memcached:
+        condition: service_started
+
+  worker:
+    depends_on:
+      - db
+      - neo4j
+      - web
+
+volumes:
+  staging-pgdata:
+  staging-neo4jdata:
