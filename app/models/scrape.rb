@@ -78,11 +78,29 @@ class Scrape < ApplicationRecord
   # the same archive#scrape_result_callback endpoint, and reproduces the 400 {code:10}
   # unsupported-url contract, so the handling in `perform` is unchanged. callback_id is sent
   # as a string (the orchestrator echoes it back verbatim in the callback).
+  #
+  # The orchestrator requires a Keycloak bearer (see MitropoulosToken). A 401 means the
+  # cached token was revoked or expired in flight: mint a fresh one and try exactly once
+  # more, so a routine key rotation never costs a scrape.
   def perform_via_orchestrator
-    headers = { "Content-Type" => "application/json" }
-    if Figaro.env.MITROPOULOS_AUTH_KEY.present?
-      headers["Authorization"] = "Bearer #{Figaro.env.MITROPOULOS_AUTH_KEY}"
+    response = post_to_orchestrator
+    if response.code == 401 && MitropoulosToken.configured?
+      MitropoulosToken.reset!
+      response = post_to_orchestrator
     end
+    response
+  rescue MitropoulosToken::Error => e
+    # Same treatment as any other failure to reach the scrape server: mark it and let the
+    # job retry. Keycloak being down is transient; a wrong secret is not, and the message
+    # says which.
+    self.mark_error
+    raise Scrape::ExternalServerError.new("Error: no orchestrator token: #{e.message}")
+  end
+
+  def post_to_orchestrator
+    headers = { "Content-Type" => "application/json" }
+    bearer = MitropoulosToken.bearer
+    headers["Authorization"] = "Bearer #{bearer}" if bearer.present?
     Typhoeus.post(
       "#{Figaro.env.MITROPOULOS_URL.chomp('/')}/scrape",
       headers: headers,

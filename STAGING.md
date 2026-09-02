@@ -12,6 +12,15 @@ touching production**. Production keeps running Hypatia the whole time.
   (Cloudflare Tunnel / Tailscale Funnel).
 - This branch (`dfernandez/mv-6-orchestrator-cutover`) and the prod secrets (Bitwarden) for
   the `[FILL]` values.
+- The **Keycloak client secret for `zenodotus`** (Bitwarden). The orchestrator refuses any
+  request without a Keycloak bearer (401); Zenodotus mints one itself from
+  `MITROPOULOS_CLIENT_ID` + `MITROPOULOS_CLIENT_SECRET`. Quick check that the credentials
+  work, before bringing anything up:
+  ```bash
+  curl -s https://sso.botalite.es/realms/botalite/protocol/openid-connect/token \
+    -d grant_type=client_credentials -d client_id=zenodotus -d client_secret=$SECRET | jq .expires_in
+  # → 300
+  ```
 
 ## Bring it up
 ```bash

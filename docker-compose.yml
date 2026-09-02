@@ -46,9 +46,14 @@ services:
       HYPATIA_SERVER_URL: ${HYPATIA_SERVER_URL}
       HYPATIA_AUTH_KEY: ${HYPATIA_AUTH_KEY}
       # MV-6 orchestrator (Mitropoulos) cutover — off unless USE_ORCHESTRATOR=true.
+      # The orchestrator authenticates callers through Keycloak: we hold a confidential
+      # client there and exchange its id + secret for a short-lived token (MitropoulosToken).
       USE_ORCHESTRATOR: ${USE_ORCHESTRATOR:-false}
       MITROPOULOS_URL: ${MITROPOULOS_URL:-}
-      MITROPOULOS_AUTH_KEY: ${MITROPOULOS_AUTH_KEY:-}
+      MITROPOULOS_TOKEN_URL: ${MITROPOULOS_TOKEN_URL:-}
+      MITROPOULOS_CLIENT_ID: ${MITROPOULOS_CLIENT_ID:-}
+      MITROPOULOS_CLIENT_SECRET: ${MITROPOULOS_CLIENT_SECRET:-}
+      MITROPOULOS_AUTH_KEY: ${MITROPOULOS_AUTH_KEY:-}   # dev only: static bearer, overrides Keycloak
       AUTH_BASE_HOST: ${AUTH_BASE_HOST}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       MAILGUN_API_KEY: ${MAILGUN_API_KEY}
