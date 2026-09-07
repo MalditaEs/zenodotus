@@ -17,6 +17,17 @@ class Scrape < ApplicationRecord
 
   enum initiated_from: [ "site", "plugin", "media_review" ]
 
+  # Which system this scrape was handed to. Set once, in `assign_backend!`.
+  enum backend: { hypatia: "hypatia", orchestrator: "orchestrator" }, _prefix: :via
+
+  # Platforms the orchestrator can archive. Anything outside this list stays on Hypatia
+  # regardless of the canary dials.
+  ORCHESTRATOR_SCRAPE_TYPES = %w[twitter instagram facebook tiktok youtube].freeze
+
+  # How long the orchestrator gets to call back before we give up on it. Its own polling
+  # ceiling is 20 minutes (`poll_max_minutes`), so this is that plus slack.
+  CALLBACK_TIMEOUT = 30.minutes
+
   has_one :archive_item, dependent: :destroy
   belongs_to :media_review, dependent: nil, optional: true
   belongs_to :user, optional: true
@@ -32,13 +43,14 @@ class Scrape < ApplicationRecord
 
   # Kicks the scrape off synchronously (you probably want `enqueue`). The return is the
   # parsed server response ({ success: true } from Hypatia; the ack from the orchestrator).
-  # By default this GETs Hypatia (legacy). When the MV-6 orchestrator
-  # (Mitropoulos) is enabled via a feature flag, it POSTs JSON to the orchestrator instead.
+  # `assign_backend!` decides which of the two this scrape belongs to and remembers the
+  # answer, so a retry goes back to the same place.
   # Either way the response handling is identical: a 400 {code:10} means the url is
   # unsupported (mark removed, don't retry); any other non-2xx is an error we retry.
   sig { returns(Hash) }
   def perform
-    response = orchestrator_enabled? ? perform_via_orchestrator : perform_via_hypatia
+    assign_backend!
+    response = via_orchestrator? ? perform_via_orchestrator : perform_via_hypatia
 
     if (200..299).exclude?(response.code)
       json_error_response = JSON.parse(response.body) rescue nil
@@ -56,9 +68,43 @@ class Scrape < ApplicationRecord
     JSON.parse(response.body)
   end
 
-  # Feature flag for the MV-6 cutover. Off by default; the legacy Hypatia path runs unless
-  # both USE_ORCHESTRATOR=true and MITROPOULOS_URL are set, so rollback is one env var.
-  def orchestrator_enabled?
+  # Decide once where this scrape goes, and record when we last handed it over.
+  #
+  # The decision has to survive a Sidekiq retry. If the dice were re-rolled on every attempt
+  # a scrape could go to the orchestrator first and Hypatia second, and the canary would be
+  # measuring its own routing rather than either backend. `dispatched_at` does move on every
+  # attempt -- the callback timeout is relative to the last dispatch, not the first.
+  sig { void }
+  def assign_backend!
+    self.backend ||= choose_backend
+    update_columns(backend: backend, dispatched_at: Time.current)
+  end
+
+  # Two levels of switch, per docs/MV6-CANARY.md. USE_ORCHESTRATOR is the master kill switch
+  # (env, needs a deploy, turns everything off). Flipper is the fine dial, one feature per
+  # platform, so the canary can be concentrated where it will actually teach us something:
+  #
+  #   Flipper.enable_percentage_of_actors(:orchestrator_canary_twitter, 100)
+  #
+  # percentage_of_actors, never percentage_of_time: it hashes this scrape's flipper_id, so
+  # the answer is stable for a given scrape, and raising the percentage only ever adds
+  # scrapes to the canary.
+  sig { returns(String) }
+  def choose_backend
+    return "hypatia" unless orchestrator_available?
+    return "hypatia" unless ORCHESTRATOR_SCRAPE_TYPES.include?(scrape_type)
+
+    Flipper.enabled?(:"orchestrator_canary_#{scrape_type}", self) ? "orchestrator" : "hypatia"
+  rescue StandardError => e
+    # A feature-flag outage must never take scraping down, nor send traffic somewhere
+    # unintended. Hypatia is the safe answer and the one production has always used.
+    logger.error("Could not consult the orchestrator canary flag, staying on Hypatia: #{e}")
+    Honeybadger.notify(e, context: { id: self.id, url: self.url, scrape_type: self.scrape_type })
+    "hypatia"
+  end
+
+  sig { returns(T::Boolean) }
+  def orchestrator_available?
     Figaro.env.USE_ORCHESTRATOR == "true" && Figaro.env.MITROPOULOS_URL.present?
   end
 
