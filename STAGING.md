@@ -97,4 +97,3 @@ Removing the variable from both ends is the rollback.
   shared with production.
 - Media: reuses the same GCS bucket by default (files coexist by basename); use a test
   bucket if you prefer.
-- YouTube will error until Antena deploys its YouTube endpoint (known).
