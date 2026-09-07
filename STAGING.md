@@ -52,6 +52,38 @@ kubectl -n mediavault patch configmap mitropoulos-config \
 kubectl -n mediavault rollout restart deploy/mitropoulos-worker deploy/mitropoulos-api
 ```
 
+## Authenticate the callback (the other half of the link)
+
+`/media_vault/archive/scrape_result_callback` has no session and no CSRF token — it is open to
+the internet, and a scrape id is a sequential integer, so anyone who guesses one can push
+content into the archive. Zenodotus now requires `Authorization: Bearer <token>` on that route
+**as soon as `ZENODOTUS_CALLBACK_TOKEN` is set**, and leaves it open when it is not (legacy
+Hypatia cannot send a bearer, which is why production stays unset until the cutover).
+
+Staging routes everything through the orchestrator, so set it on both ends with the **same**
+value:
+```bash
+TOKEN=$(openssl rand -hex 32)
+
+# Zenodotus (staging): add to .env, then recreate
+echo "ZENODOTUS_CALLBACK_TOKEN=$TOKEN" >> .env
+
+# Orchestrator: it reads the same variable name from its Secret
+kubectl -n mediavault patch secret mitropoulos-secrets \
+  --type merge -p "{\"stringData\":{\"ZENODOTUS_CALLBACK_TOKEN\":\"$TOKEN\"}}"
+kubectl -n mediavault rollout restart deploy/mitropoulos-worker deploy/mitropoulos-api
+```
+Set the orchestrator's side **first or at the same time**: with the token on Zenodotus only,
+every callback comes back 401 and the scrapes never fulfil. Check with a bare POST — it must
+be rejected, and the log line says why:
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://vault-staging.factcheckinsights.org/media_vault/archive/scrape_result_callback \
+  -H 'Content-Type: application/json' -d '{"scrape_id":"1","scrape_result":[]}'
+# → 401
+```
+Removing the variable from both ends is the rollback.
+
 ## Test
 1. Open the staging MediaVault site and **archive a URL** (twitter/x, instagram, facebook,
    tiktok).

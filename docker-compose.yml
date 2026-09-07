@@ -54,6 +54,10 @@ services:
       MITROPOULOS_CLIENT_ID: ${MITROPOULOS_CLIENT_ID:-}
       MITROPOULOS_CLIENT_SECRET: ${MITROPOULOS_CLIENT_SECRET:-}
       MITROPOULOS_AUTH_KEY: ${MITROPOULOS_AUTH_KEY:-}   # dev only: static bearer, overrides Keycloak
+      # Inbound half of the same link: the shared secret the orchestrator must present on
+      # /media_vault/archive/scrape_result_callback. Unset ⇒ the callback stays open, which is
+      # what legacy Hypatia needs. Set it only once nothing but the orchestrator calls back.
+      ZENODOTUS_CALLBACK_TOKEN: ${ZENODOTUS_CALLBACK_TOKEN:-}
       AUTH_BASE_HOST: ${AUTH_BASE_HOST}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       MAILGUN_API_KEY: ${MAILGUN_API_KEY}
