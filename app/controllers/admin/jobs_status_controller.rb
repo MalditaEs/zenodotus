@@ -65,7 +65,39 @@ class Admin::JobsStatusController < AdminController
     end
   end
 
-  # Resubmits a scrape to Hypatia
+  # Puts a scrape back on Hypatia after the orchestrator could not archive it.
+  #
+  # The canary has no automatic fallback on purpose: re-routing failures behind the scenes
+  # would repair exactly the failures it exists to measure, and the dashboard would read
+  # 100% while the integration was broken. This is the manual escape hatch instead, and
+  # because it stamps `rescued_at`, how often it was needed is the honest failure rate.
+  # See D5 in docs/MV6-CANARY.md.
+  sig { void }
+  def rescue_scrape_onto_hypatia
+    typed_params = OpenStruct.new(params)
+
+    scrape = Scrape.find(typed_params.id)
+    scrape.update!(backend: "hypatia", error: false, dispatched_at: nil, rescued_at: Time.current)
+    scrape.enqueue
+    flash[:success] = "Rescued the scrape onto Hypatia"
+
+    page = typed_params.page.nil? ? 1 : typed_params.page
+    scrapes_for_page_number(page)
+
+    ActionCable.server.broadcast("scrapes_channel", { scrapes_count: Scrape.where(fulfilled: false, error: nil).count })
+
+    respond_to do |format|
+      format.turbo_stream { render turbo_stream: [
+        turbo_stream.replace(:scrapes, partial: "admin/jobs_status/scrapes"),
+        turbo_stream.replace("flash", partial: "layouts/flashes/turbo_flashes", locals: { flash: flash })
+      ]}
+      format.html { redirect_back fallback_location: :admin_jobs_status_root }
+    end
+  end
+
+  # Re-enqueues every unfulfilled scrape on whichever backend it already belongs to. Note
+  # this no longer means "to Hypatia" for scrapes the canary routed to the orchestrator --
+  # `rescue_scrape_onto_hypatia` is the one that moves a scrape across.
   sig { void }
   def resubmit_all_unfulfilled_scrape
     # Cancel all jobs

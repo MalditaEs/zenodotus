@@ -73,6 +73,7 @@ Rails.application.routes.draw do
         post "resubmit_all_unfulfilled_scrape", as: "resubmit_all_unfulfilled_scrape"
         delete ":id", action: "delete_scrape", as: "delete"
         post "resubmit/:id", action: "resubmit_scrape", as: "resubmit"
+        post "rescue/:id", action: "rescue_scrape_onto_hypatia", as: "rescue"
       end
 
       resources :applicants, only: [:index, :show]

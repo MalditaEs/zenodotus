@@ -164,11 +164,16 @@ the scrape is found, plus the `ZENODOTUS_CALLBACK_REQUIRED` override. Revises th
 introduced earlier in this branch.
 
 **5 — Reporting and visibility.** `rails canary:report[days]` — per backend × platform:
-totals, fulfilled/error/removed/stuck, p50 and p90 latency, and the share with an archive item
-and a screenshot. Plus `backend` shown in the admin scrapes list and included in Honeybadger
-context, and a "re-enqueue on Hypatia" admin action (D5's manual net) alongside the existing
-resubmit button, whose comment currently claims it resubmits to Hypatia and would otherwise
-become untrue.
+totals, fulfilled/error/removed/stuck, p50 and p90 latency, and the share of fulfilled scrapes
+with an archive item and a screenshot. Plus `backend` shown in the admin scrapes list and in
+Honeybadger context, and a "Rescue onto Hypatia" action (D5's manual net) that stamps a new
+`scrapes.rescued_at` — the report counts those, and that count is the honest failure rate.
+The existing "resubmit all" button keeps each scrape on its own backend now, so its comment
+claiming it resubmits to Hypatia has been corrected rather than left to become untrue.
+
+Note the project has Blazer installed, so once the column exists the same comparison can be
+kept as a saved SQL dashboard for the team; the rake task is the self-contained version that
+travels with the code.
 
 **6 — This document.**
 

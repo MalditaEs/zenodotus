@@ -4,9 +4,10 @@
     <tr>
       <th class="border text-center">Id</th>
       <th class="border text-center">Scrape Type</th>
+      <th class="border text-center">Backend</th>
       <th class="border text-center">Enqueued at</th>
       <th class="border text-center">Url to scrape</th>
-      <th class="border text-center" colspan="2">Actions</th>
+      <th class="border text-center" colspan="3">Actions</th>
     </tr>
     </thead>
     <tbody id="jobs-table-body">
@@ -14,6 +15,7 @@
           <tr class="border text-gray-600 text-center">
             <td><%= scrape.id %></td>
             <td><%= scrape.scrape_type %></td>
+            <td><%= scrape.backend || "hypatia" %></td>
             <td><%= scrape.created_at %></td>
             <td><%= link_to scrape.url, scrape.url %></td>
             <td><%= link_to "Delete", admin_jobs_status_delete_path(scrape.id, page: @active_scrapes_page), data: {
@@ -24,6 +26,14 @@
                       turbo_method: :post,
                       turbo_confirm: "Are you sure you would like to resubmit this scrape?"
                     } %></td>
+            <td>
+              <% if scrape.via_orchestrator? %>
+                <%= link_to "Rescue onto Hypatia", admin_jobs_status_rescue_path(scrape.id, page: @active_scrapes_page), data: {
+                      turbo_method: :post,
+                      turbo_confirm: "Put this scrape back on Hypatia? It will be recorded as a rescue."
+                    } %>
+              <% end %>
+            </td>
           </tr>
       <% end %>
     </tbody>

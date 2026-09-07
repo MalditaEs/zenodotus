@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.2].define(version: 2026_09_07_143000) do
+ActiveRecord::Schema[7.2].define(version: 2026_09_07_151500) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "fuzzystrmatch"
   enable_extension "pgcrypto"
@@ -446,6 +446,7 @@ ActiveRecord::Schema[7.2].define(version: 2026_09_07_143000) do
     t.boolean "private"
     t.string "backend"
     t.datetime "dispatched_at"
+    t.datetime "rescued_at"
     t.index ["backend"], name: "index_scrapes_on_backend"
     t.index ["fulfilled", "error", "dispatched_at"], name: "index_scrapes_on_fulfilled_and_error_and_dispatched_at"
     t.index ["media_review_id"], name: "index_scrapes_on_media_review_id"

@@ -35,6 +35,14 @@ docker compose -f docker-compose.yml -f docker-compose.staging.yml \
 `web` runs migrations on first boot (RUN_MIGRATIONS=true), so the fresh DB is set up
 automatically. Check it's healthy: `docker compose -p zenodotus-staging ps`.
 
+`USE_ORCHESTRATOR=true` only *permits* the orchestrator — the per-platform canary dial
+decides, and it defaults to nobody (see `docs/MV6-CANARY.md`). For staging you want all of
+it, so turn every platform fully on:
+```bash
+docker compose -p zenodotus-staging exec web bin/rails runner \
+  '%w[twitter instagram facebook tiktok youtube].each { |p| Flipper.enable_percentage_of_actors(:"orchestrator_canary_#{p}", 100) }'
+```
+
 ## Point the orchestrator's callback at staging (the non-obvious step)
 The orchestrator is a single shared instance; its `ZENODOTUS_CALLBACK_BASE` targets ONE
 Zenodotus. Because **production still uses Hypatia** (`USE_ORCHESTRATOR=false` in prod), the

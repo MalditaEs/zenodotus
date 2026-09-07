@@ -18,11 +18,15 @@ class ScrapeOrchestratorTest < ActiveSupport::TestCase
     ENV["MITROPOULOS_CLIENT_SECRET"] = "s3cret"
     ENV.delete("MITROPOULOS_AUTH_KEY")
     @cache = ActiveSupport::Cache::MemoryStore.new
+    # USE_ORCHESTRATOR only permits the orchestrator; the canary dial decides. Turn Instagram
+    # fully on so these tests exercise the orchestrator path deterministically.
+    Flipper.enable(:orchestrator_canary_instagram)
     @scrape = Scrape.create!(url: "https://www.instagram.com/p/CBcqOkyDDH8/", scrape_type: :instagram)
   end
 
   def teardown
     Typhoeus::Expectation.clear
+    Flipper.disable(:orchestrator_canary_instagram)
     @saved_env.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 

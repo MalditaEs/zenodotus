@@ -239,6 +239,7 @@ class Scrape < ApplicationRecord
     Honeybadger.notify(e, context: {
       id: self.id,
       url: self.url,
+      backend: self.backend,
       response: response
     })
   end
