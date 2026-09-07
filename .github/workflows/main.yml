@@ -31,7 +31,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install system packages
-      run: sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
     - name: Set up Ruby
       uses: ruby/setup-ruby@v1
       with:
@@ -76,7 +78,9 @@ jobs:
     - uses: actions/checkout@v4
     - uses: FedericoCarboni/setup-ffmpeg@v2
     - name: Install system packages
-      run: sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libvips
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libvips
     - name: Set up Ruby
       uses: ruby/setup-ruby@v1
       with:
