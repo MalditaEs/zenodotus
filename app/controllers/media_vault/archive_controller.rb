@@ -211,9 +211,11 @@ class MediaVault::ArchiveController < MediaVaultController
 private
 
   # The scrape servers call `scrape_result_callback` from outside the session -- no user, no
-  # CSRF token -- so it is the one endpoint here that anybody on the internet can reach. A
-  # scrape id is a sequential integer, so without a shared secret anyone able to guess one
-  # can push arbitrary content into the archive under a legitimate scrape.
+  # CSRF token -- so it is the one endpoint here that anybody on the internet can reach, and
+  # what it accepts is content that lands in the archive. A scrape id is a UUIDv4, so it
+  # cannot be guessed; it is not a secret either. We hand it to a third-party scraper, it
+  # travels through the orchestrator, and it is logged at both ends -- so possession of an id
+  # is a weak thing to authorise a write on. The bearer makes an id insufficient on its own.
   #
   # The token is REQUIRED as soon as ZENODOTUS_CALLBACK_TOKEN is set, and the endpoint stays
   # open when it is not. That is deliberate: legacy Hypatia has no way to send a bearer, so
