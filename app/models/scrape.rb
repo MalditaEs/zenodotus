@@ -134,6 +134,9 @@ class Scrape < ApplicationRecord
       MitropoulosToken.reset!
       response = post_to_orchestrator
     end
+    # It answered 202 and will call back later -- or it won't, and nothing else would ever
+    # notice. Arm the timeout on the way out.
+    ScrapeTimeoutJob.set(wait: CALLBACK_TIMEOUT).perform_later(self) if (200..299).cover?(response.code)
     response
   rescue MitropoulosToken::Error => e
     # Same treatment as any other failure to reach the scrape server: mark it and let the
