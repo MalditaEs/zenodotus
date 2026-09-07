@@ -58,6 +58,9 @@ services:
       # /media_vault/archive/scrape_result_callback. Unset ⇒ the callback stays open, which is
       # what legacy Hypatia needs. Set it only once nothing but the orchestrator calls back.
       ZENODOTUS_CALLBACK_TOKEN: ${ZENODOTUS_CALLBACK_TOKEN:-}
+      # Demand it on every callback rather than only on scrapes routed to the orchestrator.
+      # For after the cutover; during the canary it would 401 Hypatia's callbacks.
+      ZENODOTUS_CALLBACK_REQUIRED: ${ZENODOTUS_CALLBACK_REQUIRED:-}
       AUTH_BASE_HOST: ${AUTH_BASE_HOST}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       MAILGUN_API_KEY: ${MAILGUN_API_KEY}

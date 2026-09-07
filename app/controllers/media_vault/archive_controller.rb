@@ -5,7 +5,6 @@ class MediaVault::ArchiveController < MediaVaultController
 
   skip_before_action :authenticate_user_and_setup!, only: :scrape_result_callback
   skip_before_action :must_be_media_vault_user, only: :scrape_result_callback
-  before_action :authenticate_scrape_callback!, only: :scrape_result_callback
 
   ARCHIVE_ITEMS_PER_PAGE = 16
 
@@ -176,8 +175,8 @@ class MediaVault::ArchiveController < MediaVaultController
     const :scrape_result, Array
   end
 
-  # When a scrape is over the scraper will call this. Unauthenticated unless
-  # ZENODOTUS_CALLBACK_TOKEN is set -- see `authenticate_scrape_callback!`.
+  # When a scrape is over the scraper will call this. What may write to a given scrape
+  # depends on where that scrape was sent -- see `authorised_callback_for?`.
   sig { void }
   def scrape_result_callback
     begin
@@ -193,6 +192,8 @@ class MediaVault::ArchiveController < MediaVaultController
     rescue ActiveRecord::RecordNotFound
       render json: { error: "Invalid scrape id" }, status: 404 and return
     end
+
+    return unless authorised_callback_for?(scrape)
 
     parsed_result = parsed_params["scrape_result"]
 
@@ -210,29 +211,42 @@ class MediaVault::ArchiveController < MediaVaultController
 
 private
 
-  # The scrape servers call `scrape_result_callback` from outside the session -- no user, no
-  # CSRF token -- so it is the one endpoint here that anybody on the internet can reach, and
-  # what it accepts is content that lands in the archive. A scrape id is a UUIDv4, so it
-  # cannot be guessed; it is not a secret either. We hand it to a third-party scraper, it
-  # travels through the orchestrator, and it is logged at both ends -- so possession of an id
-  # is a weak thing to authorise a write on. The bearer makes an id insufficient on its own.
+  # Whether this callback may write to this scrape. Renders 401 and returns false if not.
   #
-  # The token is REQUIRED as soon as ZENODOTUS_CALLBACK_TOKEN is set, and the endpoint stays
-  # open when it is not. That is deliberate: legacy Hypatia has no way to send a bearer, so
-  # production keeps the variable unset until the orchestrator cutover, and setting it is the
-  # single switch that closes the hole (the orchestrator already sends the header -- see
-  # mitropoulos/callback.py). Unsetting it is the rollback.
-  sig { void }
-  def authenticate_scrape_callback!
+  # The scrape servers call from outside the session -- no user, no CSRF token -- so this is
+  # the one endpoint here that anybody on the internet can reach, and what it accepts is
+  # content that lands in the archive. A scrape id is a UUIDv4 and cannot be guessed, but it
+  # is not a secret either: we hand it to a third-party scraper, it travels through the
+  # orchestrator, and it is logged at both ends. The bearer makes holding an id insufficient
+  # on its own.
+  #
+  # The requirement is per scrape rather than per deployment, because during the canary both
+  # systems call this endpoint: most callbacks come from Hypatia, which cannot send a bearer,
+  # and some from the orchestrator, which does. Demanding a token globally would 401 the
+  # majority of production; demanding none would leave the orchestrator's traffic
+  # unauthenticated for the whole rollout. Tying it to the scrape's own backend protects the
+  # canary from its first day and closes the endpoint by itself as the rollout reaches 100%.
+  #
+  # ZENODOTUS_CALLBACK_TOKEN unset still means the endpoint is open, which is what legacy
+  # Hypatia needs; ZENODOTUS_CALLBACK_REQUIRED=true demands the bearer for every callback
+  # whatever its backend, which is the switch for once Hypatia is gone.
+  #
+  # The trade-off against checking in a before_action is that the 401 now comes after the
+  # scrape lookup, so an unauthenticated caller can tell a real id from a bogus one by the
+  # 404. Ids being UUIDv4, that oracle cannot be enumerated and is worth the exchange.
+  sig { params(scrape: Scrape).returns(T::Boolean) }
+  def authorised_callback_for?(scrape)
     expected = Figaro.env.ZENODOTUS_CALLBACK_TOKEN
-    return if expected.blank?
+    return true if expected.blank?
+    return true unless scrape.via_orchestrator? || Figaro.env.ZENODOTUS_CALLBACK_REQUIRED == "true"
 
     # Strictly `Bearer <token>`, which is what the orchestrator sends. `secure_compare` hashes
     # both sides, so it is safe on values of different length and leaks no timing.
     presented = request.headers["Authorization"].to_s[/\ABearer (.+)\z/, 1]
-    return if presented.present? && ActiveSupport::SecurityUtils.secure_compare(presented, expected)
+    return true if presented.present? && ActiveSupport::SecurityUtils.secure_compare(presented, expected)
 
-    logger.warn("Rejected scrape callback with a missing or invalid bearer token. 🔒")
+    logger.warn("Rejected a callback for scrape #{scrape.id} (#{scrape.backend}): missing or invalid bearer. 🔒")
     render(json: { error: "Unauthorized" }, status: :unauthorized)
+    false
   end
 end

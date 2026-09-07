@@ -56,9 +56,11 @@ kubectl -n mediavault rollout restart deploy/mitropoulos-worker deploy/mitropoul
 
 `/media_vault/archive/scrape_result_callback` has no session and no CSRF token — it is open to
 the internet, and a scrape id is a sequential integer, so anyone who guesses one can push
-content into the archive. Zenodotus now requires `Authorization: Bearer <token>` on that route
-**as soon as `ZENODOTUS_CALLBACK_TOKEN` is set**, and leaves it open when it is not (legacy
-Hypatia cannot send a bearer, which is why production stays unset until the cutover).
+content into the archive. Zenodotus requires `Authorization: Bearer <token>` on that route for **scrapes it routed to
+the orchestrator**, once `ZENODOTUS_CALLBACK_TOKEN` is set. Callbacks for Hypatia scrapes keep
+the legacy open path, because Hypatia cannot send a bearer — which is what lets the production
+canary run with the token on. `ZENODOTUS_CALLBACK_REQUIRED=true` demands it for every callback
+regardless, once Hypatia is gone.
 
 Staging routes everything through the orchestrator, so set it on both ends with the **same**
 value:
