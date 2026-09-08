@@ -46,7 +46,26 @@ S3_MOCK_STUB = Proc.new do |url|
   AwsS3Mock.download_file_in_s3_received_from_hypatia(url)
 end
 
+# Typhoeus stubs live in one global list, and the mocks above install theirs once, at boot.
+# A test that adds its own stub and then calls `Typhoeus::Expectation.clear` wipes those too,
+# and every later test in the run makes real HTTP requests -- which fails far away from the
+# test that caused it. Snapshot the list around each test so a stub cannot outlive, or
+# outlast, the test that added it.
+module TyphoeusStubIsolation
+  def before_setup
+    super
+    @__typhoeus_stubs = Typhoeus::Expectation.all.dup
+  end
+
+  def after_teardown
+    Typhoeus::Expectation.all.replace(@__typhoeus_stubs)
+    super
+  end
+end
+
 class ActiveSupport::TestCase
+  include TyphoeusStubIsolation
+
   # Run tests in parallel with specified workers
   # parallelize(workers: :number_of_processors)
 

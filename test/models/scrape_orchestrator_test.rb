@@ -25,7 +25,6 @@ class ScrapeOrchestratorTest < ActiveSupport::TestCase
   end
 
   def teardown
-    Typhoeus::Expectation.clear
     Flipper.disable(:orchestrator_canary_instagram)
     @saved_env.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end

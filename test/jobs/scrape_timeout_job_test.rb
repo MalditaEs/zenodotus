@@ -55,7 +55,6 @@ class ScrapeTimeoutJobTest < ActiveJob::TestCase
       scrape.perform
     end
   ensure
-    Typhoeus::Expectation.clear
     Flipper.disable(:orchestrator_canary_instagram)
     %w[USE_ORCHESTRATOR MITROPOULOS_URL MITROPOULOS_AUTH_KEY].each { |k| ENV.delete(k) }
   end

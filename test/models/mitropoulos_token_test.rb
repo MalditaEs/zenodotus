@@ -17,7 +17,6 @@ class MitropoulosTokenTest < ActiveSupport::TestCase
   end
 
   def teardown
-    Typhoeus::Expectation.clear
     @saved_env.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 
