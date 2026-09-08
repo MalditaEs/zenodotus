@@ -32,6 +32,18 @@ module CanaryReport
 end
 
 namespace :canary do
+  desc "Create the per-platform canary features (idempotent, enables nothing)"
+  task setup: :environment do
+    # Flipper warns on every check of a feature it has never seen -- which, on the scraping
+    # hot path, is a log line per scrape per platform not yet dialled. Registering them all up
+    # front is quieter and makes `Flipper.features` show the real set of dials.
+    Scrape::ORCHESTRATOR_SCRAPE_TYPES.each do |platform|
+      feature = "orchestrator_canary_#{platform}"
+      Flipper.add(feature)
+      puts "#{feature}: #{Flipper.enabled?(feature) ? 'on' : 'off'}"
+    end
+  end
+
   desc "Compare the orchestrator against Hypatia over the last N days (default 7)"
   task :report, [:days] => :environment do |_task, args|
     days = (args[:days] || 7).to_i

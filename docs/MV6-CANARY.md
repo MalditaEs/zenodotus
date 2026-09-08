@@ -186,6 +186,12 @@ accepted; orchestrator scrape rejected without one and accepted with it;
 
 ## Runbook
 
+```bash
+# Once, before anything: register the five dials. Flipper warns on every check of a feature
+# it has never seen, which on the scraping path is a log line per scrape.
+rails canary:setup
+```
+
 ```ruby
 # Phase 1 — 10% everywhere
 %w[twitter instagram facebook tiktok youtube].each do |p|
@@ -210,3 +216,84 @@ orchestrator callback until the second half lands. `USE_ORCHESTRATOR=true` and
 `MITROPOULOS_URL` must both be set, or every dial is inert.
 
 Read the numbers with `rails canary:report[7]`.
+
+## Trying it by hand
+
+Everything below runs against a local checkout with no orchestrator and no Antena. Bring up
+the containers first (`docs/TESTING.md`), then `rails db:setup`.
+
+### Where does a scrape go?
+
+```ruby
+# rails console, with USE_ORCHESTRATOR=true and MITROPOULOS_URL set to anything
+def goes_to(type)
+  s = Scrape.create!(url: "https://example.com/#{SecureRandom.hex(4)}", scrape_type: type)
+  s.assign_backend!
+  s.backend
+end
+
+goes_to("instagram")                                                   # => "hypatia" (dial shut)
+Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
+goes_to("instagram")                                                   # => "orchestrator"
+goes_to("twitter")                                                     # => "hypatia" (its own dial)
+
+# At 30%, roughly three in ten:
+Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 30)
+40.times.map { goes_to("instagram") }.tally                            # => {"hypatia"=>31, "orchestrator"=>9}
+
+# And a scrape never moves, however the dial moves under it:
+s = Scrape.create!(url: "https://example.com/stable", scrape_type: :instagram)
+Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
+s.assign_backend!                                    # "orchestrator"
+Flipper.disable(:orchestrator_canary_instagram)
+s.assign_backend!                                    # still "orchestrator"
+```
+
+### Does the callback actually reject?
+
+Start the server with `ZENODOTUS_CALLBACK_TOKEN=secreto-de-prueba`, make one scrape on each
+backend, and POST to `/archive/scrape_result_callback` (note: no `/media_vault` prefix —
+`scope module:` adds no path segment).
+
+```bash
+CB=http://localhost:3000/archive/scrape_result_callback
+hit() { curl -s -o /dev/null -w "%{http_code}\n" -X POST "$CB" \
+  -H 'Content-Type: application/json' "${@:2}" \
+  -d "{\"scrape_id\":\"$1\",\"scrape_result\":[{\"status\":\"removed\"}]}"; }
+
+hit $HYPATIA_ID                                                    # 200 — legacy path, no bearer needed
+hit $ORCH_ID                                                       # 401
+hit $ORCH_ID -H 'Authorization: Bearer nope'                       # 401
+hit $ORCH_ID -H 'Authorization: secreto-de-prueba'                 # 401 — the scheme is required
+hit $ORCH_ID -H 'Authorization: Bearer secreto-de-prueba'          # 200
+hit 00000000-0000-0000-0000-000000000000 -H 'Authorization: Bearer secreto-de-prueba'  # 404
+```
+
+### Does the timeout fire?
+
+```ruby
+s = Scrape.create!(url: "https://example.com/lost", scrape_type: :instagram)
+s.update_columns(backend: "orchestrator", dispatched_at: 31.minutes.ago)
+s.fulfilled?, s.error?          # => false, false — invisible today
+
+ScrapeTimeoutJob.perform_now(s)
+s.reload.error?                 # => true
+
+# It leaves alone a scrape whose callback arrived, and one re-dispatched since:
+s2.update_columns(backend: "orchestrator", dispatched_at: 31.minutes.ago, fulfilled: true)
+ScrapeTimeoutJob.perform_now(s2); s2.reload.error?   # => false
+s3.update_columns(backend: "orchestrator", dispatched_at: 1.minute.ago)
+ScrapeTimeoutJob.perform_now(s3); s3.reload.error?   # => false
+```
+
+### What does the report look like?
+
+```
+backend      platform    total     ok  error  removed  stuck     p50     p90   item   shot
+------------------------------------------------------------------------------------------
+hypatia      instagram      20   100%     0%       0%     0%     60s     60s     0%     0%
+orchestrator instagram      10    80%    20%       0%     0%    100s    100s     0%     0%
+orchestrator twitter         1     0%     0%       0%   100%       -       -      -      -
+
+Manually rescued onto Hypatia: 2
+```
