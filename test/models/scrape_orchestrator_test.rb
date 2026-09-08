@@ -10,7 +10,7 @@ class ScrapeOrchestratorTest < ActiveSupport::TestCase
                 MITROPOULOS_CLIENT_SECRET MITROPOULOS_AUTH_KEY]
 
   def setup
-    @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
+    @saved_env = ENV_KEYS.index_with { |k| ENV[k] }
     ENV["USE_ORCHESTRATOR"] = "true"
     ENV["MITROPOULOS_URL"] = ORCHESTRATOR
     ENV["MITROPOULOS_TOKEN_URL"] = TOKEN_URL

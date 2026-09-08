@@ -12,7 +12,7 @@ class MediaVault::ScrapeCallbackAuthTest < ActionDispatch::IntegrationTest
 
   setup do
     host! Figaro.env.MEDIA_VAULT_HOST
-    @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
+    @saved_env = ENV_KEYS.index_with { |k| ENV[k] }
     ENV_KEYS.each { |k| ENV.delete(k) }
   end
 

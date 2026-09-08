@@ -7,7 +7,7 @@ class MitropoulosTokenTest < ActiveSupport::TestCase
   ENV_KEYS = %w[MITROPOULOS_TOKEN_URL MITROPOULOS_CLIENT_ID MITROPOULOS_CLIENT_SECRET MITROPOULOS_AUTH_KEY]
 
   def setup
-    @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
+    @saved_env = ENV_KEYS.index_with { |k| ENV[k] }
     ENV_KEYS.each { |k| ENV.delete(k) }
     ENV["MITROPOULOS_TOKEN_URL"] = TOKEN_URL
     ENV["MITROPOULOS_CLIENT_ID"] = "zenodotus"

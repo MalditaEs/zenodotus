@@ -9,7 +9,7 @@ class ScrapeRoutingTest < ActiveSupport::TestCase
   FEATURE = :orchestrator_canary_instagram
 
   def setup
-    @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
+    @saved_env = ENV_KEYS.index_with { |k| ENV[k] }
     ENV["USE_ORCHESTRATOR"] = "true"
     ENV["MITROPOULOS_URL"] = ORCHESTRATOR
     @scrape = Scrape.create!(url: "https://www.instagram.com/p/CBcqOkyDDH8/", scrape_type: :instagram)
