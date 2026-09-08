@@ -62,7 +62,7 @@ kubectl -n mediavault rollout restart deploy/mitropoulos-worker deploy/mitropoul
 
 ## Authenticate the callback (the other half of the link)
 
-`/media_vault/archive/scrape_result_callback` has no session and no CSRF token — it is open to
+`/archive/scrape_result_callback` has no session and no CSRF token — it is open to
 the internet, and a scrape id is a sequential integer, so anyone who guesses one can push
 content into the archive. Zenodotus requires `Authorization: Bearer <token>` on that route for **scrapes it routed to
 the orchestrator**, once `ZENODOTUS_CALLBACK_TOKEN` is set. Callbacks for Hypatia scrapes keep
@@ -88,7 +88,7 @@ every callback comes back 401 and the scrapes never fulfil. Check with a bare PO
 be rejected, and the log line says why:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-  https://vault-staging.factcheckinsights.org/media_vault/archive/scrape_result_callback \
+  https://vault-staging.factcheckinsights.org/archive/scrape_result_callback \
   -H 'Content-Type: application/json' -d '{"scrape_id":"1","scrape_result":[]}'
 # → 401
 ```
