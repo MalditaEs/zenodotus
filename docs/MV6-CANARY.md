@@ -1,259 +1,268 @@
-# MV-6 — Canary rollout to the orchestrator
+# MV-6 — Despliegue canario hacia el orquestador
 
-How production moves from Hypatia to the Mitropoulos orchestrator (and therefore to Antena)
-a slice at a time, and how we decide it worked. Builds on `STAGING.md`, which covers the
-isolated staging loop; this document is about production.
+Cómo pasa producción de Hypatia al orquestador Mitropoulos (y por tanto a Antena) por partes,
+y cómo decidimos que ha funcionado. Se apoya en `STAGING.md`, que cubre el bucle aislado de
+staging; este documento va de producción.
 
-Antena itself is already validated, and YouTube now works end to end through the
-orchestrator. So this canary is **not** testing whether Antena can scrape. It tests the
-**integration**: the orchestrator's mapping into the shapes Zenodotus expects, media landing
-in the bucket, and the callback loop closing under real traffic. That distinction sets what
-we measure and why we do not paper over failures.
+Antena ya está validada de por sí, y YouTube funciona de punta a punta a través del
+orquestador. Así que este canario **no** prueba si Antena sabe scrapear. Prueba la
+**integración**: el mapeo del orquestador a las formas que espera Zenodotus, que los medios
+lleguen al bucket, y que el bucle del callback se cierre con tráfico real. Esa distinción es
+la que determina qué medimos y por qué no tapamos los fallos.
 
-## Decisions
+## Decisiones
 
-**D1 — Route per scrape, and persist the decision.**
-A new `scrapes.backend` column records which system a scrape was sent to, written once and
-reused. Three things depend on it: Sidekiq retries must not re-roll the dice (a scrape that
-went to the orchestrator on attempt 1 must not land on Hypatia on attempt 2, or the numbers
-mean nothing); the callback needs to know which system is answering; and the whole point of a
-canary is being able to `GROUP BY` it afterwards.
+**D1 — Enrutar por scrape, y persistir la decisión.**
+Una columna nueva, `scrapes.backend`, registra a qué sistema se envió cada scrape, escrita una
+vez y reutilizada. Dependen de ella tres cosas: los reintentos de Sidekiq no pueden volver a
+tirar el dado (un scrape que fue al orquestador en el intento 1 no puede acabar en Hypatia en
+el 2, o los números no significan nada); el callback necesita saber qué sistema le está
+contestando; y todo el sentido de un canario es poder hacer un `GROUP BY` después.
 
-**D2 — Flipper for the dial, not an env var.**
-Flipper is already a dependency (`flipper`, `flipper-active_record`, tables in the schema)
-and already in use (`Flipper.enabled?(:adhoc, current_user)`). We use
-`percentage_of_actors`, never `percentage_of_time`: it hashes the actor's `flipper_id`
-(`"Scrape;<uuid>"`), so the same scrape always gets the same answer, and raising the
-percentage only ever *adds* scrapes. The decisive advantage over an env var is the kill
-switch — `Flipper.disable` takes effect immediately, with no deploy and no restart.
+**D2 — Flipper para el dial, no una variable de entorno.**
+Flipper ya es una dependencia (`flipper`, `flipper-active_record`, con sus tablas en el
+esquema) y ya se usa (`Flipper.enabled?(:adhoc, current_user)`). Usamos
+`percentage_of_actors`, nunca `percentage_of_time`: hashea el `flipper_id` del actor
+(`"Scrape;<uuid>"`), así que el mismo scrape recibe siempre la misma respuesta, y subir el
+porcentaje sólo *añade* scrapes. La ventaja decisiva sobre una variable de entorno es el
+interruptor de emergencia: `Flipper.disable` surte efecto de inmediato, sin desplegar y sin
+reiniciar.
 
-**D3 — One dial per platform.**
-`orchestrator_canary_twitter`, `orchestrator_canary_instagram`, and so on. At ~100 scrapes a
-day, a uniform 10% split across five platforms yields ~2 scrapes per platform per day, which
-answers nothing in any useful timeframe. Concentrating the same blast radius on one platform
-at a time yields ~20/day for that platform. See "Why not a uniform 10%" below.
+**D3 — Un dial por plataforma.**
+`orchestrator_canary_twitter`, `orchestrator_canary_instagram`, y así. A ~100 scrapes al día,
+un 10% uniforme repartido entre cinco plataformas da ~2 scrapes por plataforma y día, que no
+responde a nada en ningún plazo útil. Concentrar el mismo radio de explosión en una plataforma
+cada vez da ~20/día para esa plataforma. Ver "Por qué no un 10% uniforme" más abajo.
 
-**D4 — Two levels of switch, failing towards Hypatia.**
-`USE_ORCHESTRATOR` stays the master kill switch (env, needs a deploy, turns everything off);
-Flipper is the fine dial. Any exception raised while consulting Flipper is reported and
-routed to Hypatia. A problem in the feature-flag system must never take scraping down or send
-traffic somewhere unintended.
+**D4 — Dos niveles de interruptor, fallando hacia Hypatia.**
+`USE_ORCHESTRATOR` sigue siendo la llave maestra (variable de entorno, requiere despliegue,
+apaga todo); Flipper es el dial fino. Cualquier excepción al consultar Flipper se reporta y se
+enruta a Hypatia. Un problema en el sistema de feature flags no puede tumbar el scraping ni
+mandar tráfico a donde no toca.
 
-**D5 — No automatic fallback to Hypatia.**
-Re-routing a failed orchestrator scrape to Hypatia would hide exactly the signal we are
-collecting: every failure silently repaired, a dashboard reading 100%, and no idea that the
-integration is broken. Because Antena is already proven, the failures we expect are
-*systematic* integration faults (a field the mapping drops, a video that never reaches the
-bucket) — precisely the class a fallback makes invisible.
+**D5 — Sin fallback automático a Hypatia.**
+Reenviar a Hypatia un scrape que ha fallado en el orquestador escondería justo la señal que
+estamos recogiendo: cada fallo reparado en silencio, un panel marcando 100%, y ni idea de que
+la integración está rota. Como Antena ya está probada, los fallos que esperamos son fallos
+*sistemáticos* de integración (un campo que el mapeo pierde, un vídeo que nunca llega al
+bucket), que son precisamente los que un fallback vuelve invisibles.
 
-The safety net is **manual** instead: an admin action that re-enqueues a scrape explicitly on
-Hypatia, which records that it happened. How many rescues you had to perform *is* the failure
-rate, measured honestly.
+La red de seguridad es **manual**: una acción de admin que reencola el scrape explícitamente en
+Hypatia y deja constancia. Cuántos rescates has tenido que hacer *es* la tasa de fallo, medida
+con honestidad.
 
-**D6 — A per-scrape callback timeout, not a periodic reaper.**
-Today a scrape whose callback never arrives sits at `fulfilled: false, error: nil`
-**forever**: not fulfilled, not errored, absent from every error metric, invisible except as
-a number on the admin page that looks like it is merely slow. The only recovery is the
-"resubmit all unfulfilled" button. This is the single most likely failure mode of the
-orchestrator path — it is the only one with an asynchronous hop back across the network — and
-it must be closed before the canary starts, or failures are neither visible nor recoverable.
+**D6 — Un temporizador de callback por scrape, no un barrido periódico.**
+Hoy, un scrape cuyo callback no llega nunca se queda en `fulfilled: false, error: nil`
+**para siempre**: ni cumplido ni errado, ausente de toda métrica de error, invisible salvo
+como un número en el panel de admin que parece simplemente lento. La única recuperación es el
+botón de "resubmit all unfulfilled". Este es, con diferencia, el modo de fallo más probable de
+la vía del orquestador — es el único con un salto asíncrono de vuelta por la red — y hay que
+cerrarlo antes de empezar el canario, o los fallos no serán ni visibles ni recuperables.
 
-The project has no scheduler (no `sidekiq-cron`, `whenever`, or `clockwork`), so rather than
-introduce one we arm a delayed `ScrapeTimeoutJob` per dispatch:
-`ScrapeTimeoutJob.set(wait: 30.minutes).perform_later(scrape)`. No new dependency, no
-polling, and the job fires exactly when it is needed. 30 minutes = the orchestrator's own
-20-minute polling ceiling (`poll_max_minutes`) plus slack.
+El proyecto no tiene scheduler (ni `sidekiq-cron`, ni `whenever`, ni `clockwork`), así que en
+vez de introducir uno armamos un `ScrapeTimeoutJob` retardado en cada despacho:
+`ScrapeTimeoutJob.set(wait: 30.minutes).perform_later(scrape)`. Sin dependencia nueva, sin
+sondeo, y el trabajo salta exactamente cuando hace falta. 30 minutos = el techo de sondeo de
+20 minutos del propio orquestador (`poll_max_minutes`) más holgura.
 
-*Known bias, stated so nobody misreads the report:* the timeout is armed for orchestrator
-scrapes only, so the orchestrator gets errors marked that Hypatia's history never had. That
-biases the comparison **against** the orchestrator, which is the correct direction to be
-wrong for a safety decision. Hypatia's own stuck rate can be recovered from history
-(`fulfilled: false, error: nil` with a null backend) if we want the like-for-like number.
+*Sesgo conocido, escrito para que nadie lea mal el informe:* el temporizador se arma sólo para
+los scrapes del orquestador, así que al orquestador se le marcan errores que el histórico de
+Hypatia nunca tuvo. Eso inclina la comparación **en contra** del orquestador, que es la
+dirección correcta en la que equivocarse en una decisión de seguridad. La tasa de atascados de
+la propia Hypatia se puede recuperar del histórico (`fulfilled: false, error: nil` con backend
+nulo) si queremos el número comparable.
 
-**D7 — Callback authentication becomes per-scrape.**
-The bearer check merged as part of the orchestrator work is all-or-nothing per deployment,
-which is incompatible with a canary: during the rollout most callbacks come from Hypatia with
-no bearer and some from the orchestrator with one. Setting `ZENODOTUS_CALLBACK_TOKEN` today
-would 401 the majority of production; leaving it unset abandons the protection for the whole
-rollout.
+**D7 — La autenticación del callback pasa a ser por scrape.**
+La comprobación del bearer que entró con el trabajo del orquestador es todo-o-nada por
+despliegue, lo cual es incompatible con un canario: durante el despliegue la mayoría de los
+callbacks vienen de Hypatia sin bearer y algunos del orquestador con él. Poner
+`ZENODOTUS_CALLBACK_TOKEN` hoy daría 401 a la mayor parte de producción; dejarlo sin poner
+renuncia a la protección durante todo el despliegue.
 
-So the requirement moves onto the scrape: a callback for a scrape routed to the orchestrator
-must carry a valid bearer; one for a Hypatia scrape keeps the legacy open path. Traffic is
-protected from the first day of the canary, and when the rollout reaches 100% the endpoint is
-closed with no further change.
+Así que el requisito se traslada al scrape: un callback para un scrape enrutado al orquestador
+tiene que traer un bearer válido; el de un scrape de Hypatia mantiene la vía abierta de
+siempre. El tráfico queda protegido desde el primer día del canario, y cuando el despliegue
+llegue al 100% el endpoint queda cerrado sin ningún cambio más.
 
-*Trade-off:* the 401 can no longer be raised before the body is parsed, so an unauthenticated
-caller can once again distinguish a real scrape id from a bogus one. Scrape ids are UUIDv4
-and cannot be enumerated, so this oracle is weak and worth the exchange.
-`ZENODOTUS_CALLBACK_REQUIRED=true` forces the bearer for *every* callback regardless of
-backend — the phase 4 switch, once Hypatia is gone.
+*Contrapartida:* el 401 ya no puede lanzarse antes de parsear el cuerpo, así que un llamante no
+autenticado vuelve a poder distinguir un id de scrape real de uno inventado. Los ids de scrape
+son UUIDv4 y no se pueden enumerar, así que ese oráculo es débil y el intercambio compensa.
+`ZENODOTUS_CALLBACK_REQUIRED=true` fuerza el bearer para *todos* los callbacks
+independientemente del backend: el interruptor de la fase 4, cuando Hypatia ya no esté.
 
-**D8 — Measure outcomes and latency now; compare content by hand.**
-`ArchiveItem` is a delegated type, so field-level completeness (screenshot, video, author,
-text) lives on a different table per platform and automating it is a project of its own. It
-is also unnecessary: field-level faults are systematic and show up in the first handful of
-scrapes, which is what the phase 1 manual review is for. Automated reporting covers outcome
-rates, latency, and whether an archive item and screenshot exist at all.
+**D8 — Medir desenlaces y latencia ahora; comparar contenido a mano.**
+`ArchiveItem` es un delegated type, así que la completitud campo a campo (captura, vídeo,
+autor, texto) vive en una tabla distinta por plataforma y automatizarla es un proyecto en sí
+mismo. Además es innecesario: los fallos a nivel de campo son sistemáticos y aparecen en el
+primer puñado de scrapes, que es para lo que está la revisión manual de la fase 1. El informe
+automático cubre tasas de desenlace, latencia, y si llegó a existir un archive item y una
+captura.
 
-## Why not a uniform 10%
+## Por qué no un 10% uniforme
 
-At ~100 scrapes/day over five platforms:
+A ~100 scrapes/día repartidos entre cinco plataformas:
 
-| Configuration | Exposure | Per platform | Time to a ±3pp answer |
+| Configuración | Exposición | Por plataforma | Tiempo hasta una respuesta de ±3pp |
 |---|---|---|---|
-| 10% across all five | ~10/day | ~2/day | ~100 days |
-| 100% of one platform | ~20/day | ~20/day | ~10 days |
+| 10% en las cinco | ~10/día | ~2/día | ~100 días |
+| 100% de **una** plataforma | ~20/día | ~20/día | ~10 días |
 
-Estimating a ~95% success rate to ±3 percentage points needs roughly 200 observations. The
-two rows carry nearly the same risk and differ tenfold in what they teach.
+Estimar una tasa de éxito del ~95% con un margen de ±3 puntos porcentuales necesita del orden
+de 200 observaciones. Las dos filas conllevan prácticamente el mismo riesgo y se diferencian en
+un factor de diez en lo que enseñan.
 
-The 90/10 split is also the wrong instinct here: equal allocation matters when you must
-measure both arms at once, but **Hypatia's baseline is already in the database** from years
-of production. Every scrape sent to Hypatia during the canary teaches us nothing new, so the
-percentage should be set by how much breakage we can absorb, not by statistics.
+El reparto 90/10 es además el instinto equivocado aquí: la asignación equilibrada importa
+cuando tienes que medir los dos brazos a la vez, pero **la línea base de Hypatia ya está en la
+base de datos** tras años de producción. Cada scrape enviado a Hypatia durante el canario no
+nos enseña nada nuevo, así que el porcentaje lo debe fijar cuánta rotura podemos absorber, no
+la estadística.
 
-## Phases
+## Fases
 
-### Phase 0 — Close the hole (blocking)
-`ScrapeTimeoutJob`, armed on dispatch to the orchestrator. Nothing else starts until stuck
-scrapes become visible.
+### Fase 0 — Cerrar el agujero (bloqueante)
+`ScrapeTimeoutJob`, armado al despachar al orquestador. No empieza nada más hasta que los
+scrapes atascados sean visibles.
 
-### Phase 1 — Smoke, 2–3 days, 10% across all platforms
-Here 10% is right, because this is not statistics: it is **reading all ~30 scrapes by hand**
-and comparing each archived item against what Hypatia produces for the same URL. Systematic
-faults appear in the first one, not the two-hundredth. Go/no-go is qualitative.
+### Fase 1 — Humo, 2-3 días, 10% en todas las plataformas
+Aquí el 10% sí es lo correcto, porque esto no es estadística: es **leerse los ~30 scrapes a
+mano** y comparar cada elemento archivado con lo que produce Hypatia para la misma URL. Los
+fallos sistemáticos aparecen en el primero, no en el doscientos. El sí/no es cualitativo.
 
-### Phase 2 — One platform at 100%, ~10 days
-Start with the highest-volume platform: it answers fastest, and it is where a regression
-costs most, so it is where we want to know soonest. ~200 scrapes gives that platform's rate
-to ±3pp and a real decision.
+### Fase 2 — Una plataforma al 100%, ~10 días
+Empezar por la plataforma de más volumen: responde antes, y es donde más cuesta una regresión,
+así que es donde antes queremos saberlo. ~200 scrapes dan la tasa de esa plataforma con ±3pp y
+una decisión de verdad.
 
-### Phase 3 — The rest, ~2 weeks
-Once one platform has validated the shared machinery (callback, auth, media transfer, the
-mapping framework), the others only carry their own mapping. They can go on together.
+### Fase 3 — El resto, ~2 semanas
+Una vez que una plataforma ha validado la maquinaria compartida (callback, auth, transferencia
+de medios, el armazón del mapeo), las demás sólo aportan su propio mapeo. Pueden ir juntas.
 
-### Phase 4 — Cutover
-`ZENODOTUS_CALLBACK_REQUIRED=true`, Hypatia retired, the `backend` column kept for history.
+### Fase 4 — Cutover
+`ZENODOTUS_CALLBACK_REQUIRED=true`, Hypatia retirada, y la columna `backend` se mantiene para
+el histórico.
 
-Roughly a month end to end. Strictly sequential platform-by-platform would be two and a half
-and is not worth it.
+Aproximadamente un mes de principio a fin. Estrictamente secuencial plataforma por plataforma
+serían dos meses y medio, y no compensa.
 
-## Implementation
+## Implementación
 
-Six commits on `dfernandez/mv-6-orchestrator-cutover`.
+En la rama `dfernandez/mv-6-orchestrator-cutover`.
 
-**1 — Migration.** `scrapes.backend` (string, nullable; null = legacy, pre-canary) and
-`scrapes.dispatched_at`. A plain string with a Rails enum rather than a PG enum like
-`scrape_type`: values may yet change, and altering a PG enum in place is painful. Indexes on
-`backend` and on `(fulfilled, error, dispatched_at)` for the stuck-scrape query.
+**1 — Migración.** `scrapes.backend` (string, nullable; nulo = anterior al canario, o sea
+Hypatia) y `scrapes.dispatched_at`. Un string normal con un enum de Rails en vez de un enum de
+PG como `scrape_type`: los valores todavía pueden cambiar, y alterar un enum de PG in situ es
+doloroso. Índices sobre `backend` y sobre `(fulfilled, error, dispatched_at)` para la consulta
+de scrapes atascados.
 
-`dispatched_at` is when we last handed the scrape over — not `created_at`, which includes
-queue time. The timeout and the latency metric both need it.
+`dispatched_at` es cuándo entregamos el scrape por última vez, que no es `created_at` — ese
+incluye el tiempo en cola. Lo necesitan tanto el temporizador como la métrica de latencia.
 
-**2 — Routing.** `Scrape#orchestrator_enabled?` becomes `assign_backend!` + `choose_backend`,
-consulting `USE_ORCHESTRATOR`, the platform allow-list, and
-`Flipper.enabled?(:"orchestrator_canary_#{scrape_type}", self)`, rescuing to `hypatia`.
-`backend` is written once; `dispatched_at` on every attempt.
+**2 — Enrutado.** `Scrape#orchestrator_enabled?` se convierte en `assign_backend!` +
+`choose_backend`, que consultan `USE_ORCHESTRATOR`, la lista de plataformas permitidas y
+`Flipper.enabled?(:"orchestrator_canary_#{scrape_type}", self)`, con `rescue` a `hypatia`.
+`backend` se escribe una vez; `dispatched_at`, en cada intento.
 
-**3 — `ScrapeTimeoutJob`.** Armed at the end of a successful orchestrator dispatch. On firing:
-no-op if the scrape is fulfilled or already errored, no-op if it was re-dispatched since
-(compare `dispatched_at`), otherwise `mark_error` and notify Honeybadger.
+**3 — `ScrapeTimeoutJob`.** Armado al final de un despacho exitoso al orquestador. Al saltar:
+no hace nada si el scrape está cumplido o ya errado, no hace nada si se redespachó desde
+entonces (comparando `dispatched_at`), y si no, `mark_error` y aviso a Honeybadger.
 
-**4 — Per-scrape callback auth.** The `before_action` becomes a check inside the action, after
-the scrape is found, plus the `ZENODOTUS_CALLBACK_REQUIRED` override. Revises the behaviour
-introduced earlier in this branch.
+**4 — Auth del callback por scrape.** El `before_action` se convierte en una comprobación
+dentro de la acción, después de encontrar el scrape, más la anulación con
+`ZENODOTUS_CALLBACK_REQUIRED`. Revisa el comportamiento introducido antes en esta misma rama.
 
-**5 — Reporting and visibility.** `rails canary:report[days]` — per backend × platform:
-totals, fulfilled/error/removed/stuck, p50 and p90 latency, and the share of fulfilled scrapes
-with an archive item and a screenshot. Plus `backend` shown in the admin scrapes list and in
-Honeybadger context, and a "Rescue onto Hypatia" action (D5's manual net) that stamps a new
-`scrapes.rescued_at` — the report counts those, and that count is the honest failure rate.
-The existing "resubmit all" button keeps each scrape on its own backend now, so its comment
-claiming it resubmits to Hypatia has been corrected rather than left to become untrue.
+**5 — Informe y visibilidad.** `rails canary:report[días]` — por backend × plataforma: totales,
+cumplidos/error/eliminados/atascados, latencia p50 y p90, y la proporción de scrapes cumplidos
+con archive item y con captura. Además, `backend` visible en la lista de scrapes del admin y en
+el contexto de Honeybadger, y una acción "Rescue onto Hypatia" (la red manual de D5) que sella
+un `scrapes.rescued_at` nuevo — el informe los cuenta, y ese recuento es la tasa de fallo
+honesta. El botón existente de "resubmit all" ahora mantiene cada scrape en su propio backend,
+así que su comentario, que decía que reenvía a Hypatia, se ha corregido en vez de dejarlo
+convertirse en mentira.
 
-Note the project has Blazer installed, so once the column exists the same comparison can be
-kept as a saved SQL dashboard for the team; the rake task is the self-contained version that
-travels with the code.
+Nótese que el proyecto tiene Blazer instalado, así que en cuanto exista la columna la misma
+comparación se puede guardar como panel SQL para el equipo; la tarea de rake es la versión
+autocontenida que viaja con el código.
 
-**6 — This document.**
+**6 — Este documento.**
 
 ### Tests
-Routing: stable across retries; honours the master switch, the platform list and the Flipper
-percentage; falls back to Hypatia when Flipper raises. Timeout: no-op when fulfilled, no-op
-when re-dispatched, marks error otherwise. Callback auth: Hypatia scrape with no bearer
-accepted; orchestrator scrape rejected without one and accepted with it;
-`ZENODOTUS_CALLBACK_REQUIRED` forcing it for both. Report task: smoke.
+Enrutado: estable entre reintentos; respeta la llave maestra, la lista de plataformas y el
+porcentaje de Flipper; cae a Hypatia cuando Flipper lanza una excepción. Temporizador: no hace
+nada si está cumplido, no hace nada si se redespachó, y marca error en el resto de casos. Auth
+del callback: scrape de Hypatia sin bearer aceptado; scrape del orquestador rechazado sin él y
+aceptado con él; `ZENODOTUS_CALLBACK_REQUIRED` forzándolo para ambos. Tarea de informe: humo.
 
 ## Runbook
 
 ```bash
-# Once, before anything: register the five dials. Flipper warns on every check of a feature
-# it has never seen, which on the scraping path is a log line per scrape.
+# Una vez, antes de nada: registrar los cinco dials. Flipper avisa cada vez que le preguntan
+# por un feature que no ha visto nunca, y en el camino del scraping eso es una línea de log
+# por scrape.
 rails canary:setup
 ```
 
 ```ruby
-# Phase 1 — 10% everywhere
+# Fase 1 — 10% en todas
 %w[twitter instagram facebook tiktok youtube].each do |p|
   Flipper.enable_percentage_of_actors(:"orchestrator_canary_#{p}", 10)
 end
 
-# Phase 2 — one platform, all of it
+# Fase 2 — una plataforma, entera
 Flipper.enable_percentage_of_actors(:orchestrator_canary_twitter, 100)
 %w[instagram facebook tiktok youtube].each do |p|
   Flipper.disable(:"orchestrator_canary_#{p}")
 end
 
-# Stop everything, immediately, no deploy
+# Parar todo, de inmediato, sin desplegar
 %w[twitter instagram facebook tiktok youtube].each do |p|
   Flipper.disable(:"orchestrator_canary_#{p}")
 end
 ```
 
-Before phase 1, and in this order: set `ZENODOTUS_CALLBACK_TOKEN` on the orchestrator's
-Secret **first**, then on Zenodotus (see `STAGING.md`) — the reverse order 401s every
-orchestrator callback until the second half lands. `USE_ORCHESTRATOR=true` and
-`MITROPOULOS_URL` must both be set, or every dial is inert.
+Antes de la fase 1, y en este orden: poner `ZENODOTUS_CALLBACK_TOKEN` **primero** en el Secret
+del orquestador, y después en Zenodotus (ver `STAGING.md`) — al revés, todos los callbacks del
+orquestador dan 401 hasta que aterriza la segunda mitad. `USE_ORCHESTRATOR=true` y
+`MITROPOULOS_URL` tienen que estar puestos los dos, o todos los dials son inertes.
 
-Read the numbers with `rails canary:report[7]`.
+Los números se leen con `rails canary:report[7]`.
 
-## Trying it by hand
+## Probarlo a mano
 
-Everything below runs against a local checkout with no orchestrator and no Antena. Bring up
-the containers first (`docs/TESTING.md`), then `rails db:setup`.
+Todo lo de abajo corre contra un checkout local, sin orquestador y sin Antena. Levanta primero
+los contenedores (`docs/TESTING.md`) y luego `rails db:setup`.
 
-### Where does a scrape go?
+### ¿A dónde va un scrape?
 
 ```ruby
-# rails console, with USE_ORCHESTRATOR=true and MITROPOULOS_URL set to anything
+# rails console, con USE_ORCHESTRATOR=true y MITROPOULOS_URL apuntando a cualquier cosa
 def goes_to(type)
   s = Scrape.create!(url: "https://example.com/#{SecureRandom.hex(4)}", scrape_type: type)
   s.assign_backend!
   s.backend
 end
 
-goes_to("instagram")                                                   # => "hypatia" (dial shut)
+goes_to("instagram")                                                   # => "hypatia" (dial cerrado)
 Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
 goes_to("instagram")                                                   # => "orchestrator"
-goes_to("twitter")                                                     # => "hypatia" (its own dial)
+goes_to("twitter")                                                     # => "hypatia" (tiene su propio dial)
 
-# At 30%, roughly three in ten:
+# Al 30%, aproximadamente tres de cada diez:
 Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 30)
 40.times.map { goes_to("instagram") }.tally                            # => {"hypatia"=>31, "orchestrator"=>9}
 
-# And a scrape never moves, however the dial moves under it:
+# Y un scrape no se mueve nunca, por mucho que el dial se mueva debajo:
 s = Scrape.create!(url: "https://example.com/stable", scrape_type: :instagram)
 Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
 s.assign_backend!                                    # "orchestrator"
 Flipper.disable(:orchestrator_canary_instagram)
-s.assign_backend!                                    # still "orchestrator"
+s.assign_backend!                                    # sigue siendo "orchestrator"
 ```
 
-### Does the callback actually reject?
+### ¿El callback rechaza de verdad?
 
-Start the server with `ZENODOTUS_CALLBACK_TOKEN=secreto-de-prueba`, make one scrape on each
-backend, and POST to `/archive/scrape_result_callback` (note: no `/media_vault` prefix —
-`scope module:` adds no path segment).
+Arranca el servidor con `ZENODOTUS_CALLBACK_TOKEN=secreto-de-prueba`, crea un scrape en cada
+backend, y haz POST a `/archive/scrape_result_callback` (ojo: sin prefijo `/media_vault` —
+`scope module:` no añade segmento de ruta).
 
 ```bash
 CB=http://localhost:3000/archive/scrape_result_callback
@@ -261,32 +270,32 @@ hit() { curl -s -o /dev/null -w "%{http_code}\n" -X POST "$CB" \
   -H 'Content-Type: application/json' "${@:2}" \
   -d "{\"scrape_id\":\"$1\",\"scrape_result\":[{\"status\":\"removed\"}]}"; }
 
-hit $HYPATIA_ID                                                    # 200 — legacy path, no bearer needed
+hit $HYPATIA_ID                                                    # 200 — vía legacy, no le pedimos bearer
 hit $ORCH_ID                                                       # 401
 hit $ORCH_ID -H 'Authorization: Bearer nope'                       # 401
-hit $ORCH_ID -H 'Authorization: secreto-de-prueba'                 # 401 — the scheme is required
+hit $ORCH_ID -H 'Authorization: secreto-de-prueba'                 # 401 — el esquema es obligatorio
 hit $ORCH_ID -H 'Authorization: Bearer secreto-de-prueba'          # 200
 hit 00000000-0000-0000-0000-000000000000 -H 'Authorization: Bearer secreto-de-prueba'  # 404
 ```
 
-### Does the timeout fire?
+### ¿Salta el temporizador?
 
 ```ruby
 s = Scrape.create!(url: "https://example.com/lost", scrape_type: :instagram)
 s.update_columns(backend: "orchestrator", dispatched_at: 31.minutes.ago)
-s.fulfilled?, s.error?          # => false, false — invisible today
+s.fulfilled?, s.error?          # => false, false — hoy esto es invisible
 
 ScrapeTimeoutJob.perform_now(s)
 s.reload.error?                 # => true
 
-# It leaves alone a scrape whose callback arrived, and one re-dispatched since:
+# Deja en paz un scrape cuyo callback llegó, y uno redespachado desde entonces:
 s2.update_columns(backend: "orchestrator", dispatched_at: 31.minutes.ago, fulfilled: true)
 ScrapeTimeoutJob.perform_now(s2); s2.reload.error?   # => false
 s3.update_columns(backend: "orchestrator", dispatched_at: 1.minute.ago)
 ScrapeTimeoutJob.perform_now(s3); s3.reload.error?   # => false
 ```
 
-### What does the report look like?
+### ¿Qué pinta tiene el informe?
 
 ```
 backend      platform    total     ok  error  removed  stuck     p50     p90   item   shot
