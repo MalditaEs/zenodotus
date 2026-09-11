@@ -32,15 +32,22 @@ module CanaryReport
 end
 
 namespace :canary do
-  desc "Create the per-platform canary features (idempotent, enables nothing)"
-  task setup: :environment do
-    # Flipper warns on every check of a feature it has never seen -- which, on the scraping
-    # hot path, is a log line per scrape per platform not yet dialled. Registering them all up
-    # front is quieter and makes `Flipper.features` show the real set of dials.
+  desc "Show the share of new scrapes each platform would send to the orchestrator"
+  task status: :environment do
+    # Describes the environment of the process running it. Routing is decided in the Sidekiq
+    # worker, so ask the worker -- `docker compose exec worker bin/rails canary:status` -- or
+    # this reports on whichever shell it happened to be started from.
+    puts "USE_ORCHESTRATOR=#{ENV['USE_ORCHESTRATOR'].inspect}  MITROPOULOS_URL=#{ENV['MITROPOULOS_URL'].inspect}"
+    unless Scrape.new.orchestrator_available?
+      puts "The orchestrator is not permitted: every scrape goes to Hypatia, whatever the percentages say."
+    end
+    puts
+
     Scrape::ORCHESTRATOR_SCRAPE_TYPES.each do |platform|
-      feature = "orchestrator_canary_#{platform}"
-      Flipper.add(feature)
-      puts "#{feature}: #{Flipper.enabled?(feature) ? 'on' : 'off'}"
+      override = "ORCHESTRATOR_CANARY_PERCENT_#{platform.upcase}"
+      source = ENV[override].present? ? override : "ORCHESTRATOR_CANARY_PERCENT"
+      percent = Scrape.new(scrape_type: platform).canary_percent
+      puts format("%-10s %3d%%   from %s=%s", platform, percent, source, ENV[source].inspect)
     end
   end
 

@@ -7,7 +7,8 @@ class ScrapeOrchestratorTest < ActiveSupport::TestCase
   TOKEN_URL = "https://sso.example.org/realms/botalite/protocol/openid-connect/token"
 
   ENV_KEYS = %w[USE_ORCHESTRATOR MITROPOULOS_URL MITROPOULOS_TOKEN_URL MITROPOULOS_CLIENT_ID
-                MITROPOULOS_CLIENT_SECRET MITROPOULOS_AUTH_KEY]
+                MITROPOULOS_CLIENT_SECRET MITROPOULOS_AUTH_KEY
+                ORCHESTRATOR_CANARY_PERCENT ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM]
 
   def setup
     @saved_env = ENV_KEYS.index_with { |k| ENV[k] }
@@ -18,14 +19,14 @@ class ScrapeOrchestratorTest < ActiveSupport::TestCase
     ENV["MITROPOULOS_CLIENT_SECRET"] = "s3cret"
     ENV.delete("MITROPOULOS_AUTH_KEY")
     @cache = ActiveSupport::Cache::MemoryStore.new
-    # USE_ORCHESTRATOR only permits the orchestrator; the canary dial decides. Turn Instagram
-    # fully on so these tests exercise the orchestrator path deterministically.
-    Flipper.enable(:orchestrator_canary_instagram)
+    # USE_ORCHESTRATOR only permits the orchestrator; the canary percentage decides. Route all
+    # of it so these tests exercise the orchestrator path deterministically.
+    ENV["ORCHESTRATOR_CANARY_PERCENT"] = "100"
+    ENV.delete("ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM")
     @scrape = Scrape.create!(url: "https://www.instagram.com/p/CBcqOkyDDH8/", scrape_type: :instagram)
   end
 
   def teardown
-    Flipper.disable(:orchestrator_canary_instagram)
     @saved_env.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
   end
 

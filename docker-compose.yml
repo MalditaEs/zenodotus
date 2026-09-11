@@ -121,6 +121,14 @@ services:
       NEO4J_PASSWORD: password
       MALLOC_ARENA_MAX: "2"
       RUN_MIGRATIONS: "false"
+      # MV-6 canary. Routing is decided here, in the worker -- ScrapeJob is the only caller of
+      # Scrape#perform -- so this is the process that has to see these; web never reads them.
+      # After changing them run `docker compose up -d worker`: `restart` keeps the environment
+      # the container was created with. Per-platform overrides
+      # (ORCHESTRATOR_CANARY_PERCENT_TWITTER, ...) arrive through env_file.
+      USE_ORCHESTRATOR: ${USE_ORCHESTRATOR:-false}
+      MITROPOULOS_URL: ${MITROPOULOS_URL:-}
+      ORCHESTRATOR_CANARY_PERCENT: ${ORCHESTRATOR_CANARY_PERCENT:-0}
       # S3 / Shrine
       AWS_REGION: ${AWS_REGION}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}

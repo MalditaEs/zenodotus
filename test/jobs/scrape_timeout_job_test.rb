@@ -45,7 +45,7 @@ class ScrapeTimeoutJobTest < ActiveJob::TestCase
     ENV["USE_ORCHESTRATOR"] = "true"
     ENV["MITROPOULOS_URL"] = "https://orchestrator.example.org"
     ENV["MITROPOULOS_AUTH_KEY"] = "dev-token"
-    Flipper.enable(:orchestrator_canary_instagram)
+    ENV["ORCHESTRATOR_CANARY_PERCENT"] = "100"
     Typhoeus.stub("https://orchestrator.example.org/scrape").and_return(
       Typhoeus::Response.new(code: 202, body: { status: "queued" }.to_json)
     )
@@ -55,7 +55,6 @@ class ScrapeTimeoutJobTest < ActiveJob::TestCase
       scrape.perform
     end
   ensure
-    Flipper.disable(:orchestrator_canary_instagram)
-    %w[USE_ORCHESTRATOR MITROPOULOS_URL MITROPOULOS_AUTH_KEY].each { |k| ENV.delete(k) }
+    %w[USE_ORCHESTRATOR MITROPOULOS_URL MITROPOULOS_AUTH_KEY ORCHESTRATOR_CANARY_PERCENT].each { |k| ENV.delete(k) }
   end
 end

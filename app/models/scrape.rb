@@ -80,27 +80,46 @@ class Scrape < ApplicationRecord
     update_columns(backend: backend, dispatched_at: Time.current)
   end
 
-  # Two levels of switch, per docs/MV6-CANARY.md. USE_ORCHESTRATOR is the master kill switch
-  # (env, needs a deploy, turns everything off). Flipper is the fine dial, one feature per
-  # platform, so the canary can be concentrated where it will actually teach us something:
+  # Two levels of switch, per docs/MV6-CANARY.md, both of them environment variables:
   #
-  #   Flipper.enable_percentage_of_actors(:orchestrator_canary_twitter, 100)
+  #   USE_ORCHESTRATOR=true                     master switch; anything else sends everything to Hypatia
+  #   ORCHESTRATOR_CANARY_PERCENT=10            share of scrapes routed to the orchestrator
+  #   ORCHESTRATOR_CANARY_PERCENT_TWITTER=100   per-platform override of that share
   #
-  # percentage_of_actors, never percentage_of_time: it hashes this scrape's flipper_id, so
-  # the answer is stable for a given scrape, and raising the percentage only ever adds
-  # scrapes to the canary.
+  # They are read here, and `perform` only ever runs in the Sidekiq worker (ScrapeJob), so the
+  # worker is the process that has to see them. Changing them means `docker compose up -d
+  # worker`: a plain `restart` keeps the environment the container was created with.
+  #
+  # The bucket is a hash of the scrape's id rather than a random draw, so the same scrape always
+  # gets the same answer and raising the percentage only ever adds scrapes. `assign_backend!`
+  # persists the decision regardless, so a new value only affects scrapes performed after the
+  # worker picks it up.
   sig { returns(String) }
   def choose_backend
     return "hypatia" unless orchestrator_available?
     return "hypatia" unless ORCHESTRATOR_SCRAPE_TYPES.include?(scrape_type)
 
-    Flipper.enabled?(:"orchestrator_canary_#{scrape_type}", self) ? "orchestrator" : "hypatia"
-  rescue StandardError => e
-    # A feature-flag outage must never take scraping down, nor send traffic somewhere
-    # unintended. Hypatia is the safe answer and the one production has always used.
-    logger.error("Could not consult the orchestrator canary flag, staying on Hypatia: #{e}")
-    Honeybadger.notify(e, context: { id: self.id, url: self.url, scrape_type: self.scrape_type })
-    "hypatia"
+    Zlib.crc32(self.id.to_s) % 100 < canary_percent ? "orchestrator" : "hypatia"
+  end
+
+  # The share of this scrape's platform that goes to the orchestrator, from 0 to 100.
+  #
+  # The platform's own variable wins when it is set, even to 0, so one platform can be shut
+  # while the rest run. An empty one counts as unset, which is what `${VAR:-}` in docker-compose
+  # produces. Anything that is not a whole number from 0 to 100 counts as 0: a typo like "10%"
+  # or "150" has to fail towards Hypatia, never towards routing everything to the orchestrator.
+  sig { returns(Integer) }
+  def canary_percent
+    platform_variable = "ORCHESTRATOR_CANARY_PERCENT_#{scrape_type.to_s.upcase}"
+    variable = ENV[platform_variable].present? ? platform_variable : "ORCHESTRATOR_CANARY_PERCENT"
+    raw = ENV[variable]
+    return 0 if raw.blank?
+
+    value = Integer(raw, 10, exception: false)
+    return value if value && (0..100).cover?(value)
+
+    logger.error("#{variable}=#{raw.inspect} is not a whole number from 0 to 100; routing to Hypatia.")
+    0
   end
 
   sig { returns(T::Boolean) }

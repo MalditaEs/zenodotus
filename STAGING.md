@@ -35,13 +35,15 @@ docker compose -f docker-compose.yml -f docker-compose.staging.yml \
 `web` runs migrations on first boot (RUN_MIGRATIONS=true), so the fresh DB is set up
 automatically. Check it's healthy: `docker compose -p zenodotus-staging ps`.
 
-`USE_ORCHESTRATOR=true` only *permits* the orchestrator — the per-platform canary dial
-decides, and it defaults to nobody (see `docs/MV6-CANARY.md`). For staging you want all of
-it, so turn every platform fully on:
+`USE_ORCHESTRATOR=true` only *permits* the orchestrator — `ORCHESTRATOR_CANARY_PERCENT`
+decides what share goes there, and unset means nobody (see `docs/MV6-CANARY.md`). Staging
+wants all of it, which is why `.env.staging.example` sets it to `100`. Routing is decided in
+the worker, not in `web`, so check what the worker actually sees:
 ```bash
-docker compose -p zenodotus-staging exec web bin/rails runner \
-  '%w[twitter instagram facebook tiktok youtube].each { |p| Flipper.enable_percentage_of_actors(:"orchestrator_canary_#{p}", 100) }'
+docker compose -p zenodotus-staging exec worker bin/rails canary:status
 ```
+If you change it, `up -d` the worker again — `docker compose restart` keeps the environment the
+container was created with, and the new value would silently do nothing.
 
 ## Point the orchestrator's callback at staging (the non-obvious step)
 The orchestrator is a single shared instance; its `ZENODOTUS_CALLBACK_BASE` targets ONE

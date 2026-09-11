@@ -19,26 +19,23 @@ tirar el dado (un scrape que fue al orquestador en el intento 1 no puede acabar 
 el 2, o los números no significan nada); el callback necesita saber qué sistema le está
 contestando; y todo el sentido de un canario es poder hacer un `GROUP BY` después.
 
-**D2 — Flipper para el dial, no una variable de entorno.**
-Flipper ya es una dependencia (`flipper`, `flipper-active_record`, con sus tablas en el
-esquema) y ya se usa (`Flipper.enabled?(:adhoc, current_user)`). Usamos
-`percentage_of_actors`, nunca `percentage_of_time`: hashea el `flipper_id` del actor
-(`"Scrape;<uuid>"`), así que el mismo scrape recibe siempre la misma respuesta, y subir el
-porcentaje sólo *añade* scrapes. La ventaja decisiva sobre una variable de entorno es el
-interruptor de emergencia: `Flipper.disable` surte efecto de inmediato, sin desplegar y sin
-reiniciar.
+**D2 — ~~Flipper para el dial, no una variable de entorno.~~ Sustituida por D9.**
+La propuesta original era Flipper con `percentage_of_actors`, y su razón de peso era que
+`Flipper.disable` para el canario al instante, sin desplegar ni reiniciar. Se descartó a favor
+de variables de entorno; el porqué, y lo que se pierde, está en D9.
 
 **D3 — Un dial por plataforma.**
-`orchestrator_canary_twitter`, `orchestrator_canary_instagram`, y así. A ~100 scrapes al día,
+`ORCHESTRATOR_CANARY_PERCENT_TWITTER`, `ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM`, y así, por
+encima del porcentaje global `ORCHESTRATOR_CANARY_PERCENT` (D9). A ~100 scrapes al día,
 un 10% uniforme repartido entre cinco plataformas da ~2 scrapes por plataforma y día, que no
 responde a nada en ningún plazo útil. Concentrar el mismo radio de explosión en una plataforma
 cada vez da ~20/día para esa plataforma. Ver "Por qué no un 10% uniforme" más abajo.
 
 **D4 — Dos niveles de interruptor, fallando hacia Hypatia.**
-`USE_ORCHESTRATOR` sigue siendo la llave maestra (variable de entorno, requiere despliegue,
-apaga todo); Flipper es el dial fino. Cualquier excepción al consultar Flipper se reporta y se
-enruta a Hypatia. Un problema en el sistema de feature flags no puede tumbar el scraping ni
-mandar tráfico a donde no toca.
+`USE_ORCHESTRATOR` es la llave maestra: apaga todo de un golpe, digan lo que digan los
+porcentajes. `ORCHESTRATOR_CANARY_PERCENT` y sus variantes por plataforma son el dial fino. Un
+valor que no sea un entero de 0 a 100 cuenta como 0 y deja un error en el log: una errata como
+`10%` o `150` tiene que caer hacia Hypatia, nunca hacia mandarlo todo al orquestador.
 
 **D5 — Sin fallback automático a Hypatia.**
 Reenviar a Hypatia un scrape que ha fallado en el orquestador escondería justo la señal que
@@ -97,6 +94,35 @@ mismo. Además es innecesario: los fallos a nivel de campo son sistemáticos y a
 primer puñado de scrapes, que es para lo que está la revisión manual de la fase 1. El informe
 automático cubre tasas de desenlace, latencia, y si llegó a existir un archive item y una
 captura.
+
+**D9 — El porcentaje se controla por variable de entorno (sustituye a D2).**
+`ORCHESTRATOR_CANARY_PERCENT` fija la proporción global, de 0 a 100, y
+`ORCHESTRATOR_CANARY_PERCENT_<PLATAFORMA>` la sobrescribe para esa plataforma cuando está
+puesta, incluso a `0`. Una variable vacía cuenta como no puesta, que es lo que produce
+`${VAR:-}` en docker-compose. Sin ninguna de las dos, nadie va al orquestador.
+
+El cubo de cada scrape es `crc32(id) % 100`, y va al orquestador si queda por debajo del
+porcentaje. No es un sorteo: el mismo scrape da siempre la misma respuesta, y subir el
+porcentaje sólo añade scrapes — las dos propiedades por las que se había elegido
+`percentage_of_actors`. Comprobado sobre 100.000 UUID: 10,08% al 10, 29,76% al 30, 50,12% al 50.
+
+*Lo que se gana.* La configuración vive donde vive el resto del despliegue: se ve en el `.env`,
+sin estado escondido en una tabla de Flipper. Desaparece además el ruido de log por features no
+registrados, y con él la tarea `canary:setup`.
+
+*Lo que se pierde.* Parar el canario ya no es instantáneo: hay que cambiar el `.env` y volver a
+levantar el worker. A ~100 scrapes al día, unos 4 por hora, el minuto que tarda eso enruta de
+media menos de un scrape de más, así que a este volumen la ventaja de Flipper era casi teórica.
+
+*Dos trampas, las dos comprobadas:*
+- **Sólo lo lee el worker.** `Scrape#perform` sólo se llama desde `ScrapeJob`, que corre en
+  Sidekiq; `web` únicamente encola. Reiniciar `web` no cambia nada.
+- **`docker compose restart worker` no sirve.** Conserva el entorno con el que se creó el
+  contenedor, y el valor nuevo no hace nada sin avisar. Hay que usar `docker compose up -d
+  worker`, que sí vuelve a leer el `.env` y recrea el contenedor.
+
+Un porcentaje nuevo sólo afecta a los scrapes cuyo `perform` se ejecute después. Los que ya
+tienen `backend` lo conservan (D1), reintentos incluidos.
 
 ## Por qué no un 10% uniforme
 
@@ -159,8 +185,8 @@ incluye el tiempo en cola. Lo necesitan tanto el temporizador como la métrica d
 
 **2 — Enrutado.** `Scrape#orchestrator_enabled?` se convierte en `assign_backend!` +
 `choose_backend`, que consultan `USE_ORCHESTRATOR`, la lista de plataformas permitidas y
-`Flipper.enabled?(:"orchestrator_canary_#{scrape_type}", self)`, con `rescue` a `hypatia`.
-`backend` se escribe una vez; `dispatched_at`, en cada intento.
+`canary_percent` (la variable de la plataforma si está puesta, si no la global, y 0 si el valor
+no es válido). `backend` se escribe una vez; `dispatched_at`, en cada intento.
 
 **3 — `ScrapeTimeoutJob`.** Armado al final de un despacho exitoso al orquestador. Al saltar:
 no hace nada si el scrape está cumplido o ya errado, no hace nada si se redespachó desde
@@ -177,7 +203,8 @@ el contexto de Honeybadger, y una acción "Rescue onto Hypatia" (la red manual d
 un `scrapes.rescued_at` nuevo — el informe los cuenta, y ese recuento es la tasa de fallo
 honesta. El botón existente de "resubmit all" ahora mantiene cada scrape en su propio backend,
 así que su comentario, que decía que reenvía a Hypatia, se ha corregido en vez de dejarlo
-convertirse en mentira.
+convertirse en mentira. `rails canary:status` muestra, para cada plataforma, el porcentaje
+efectivo con el entorno del proceso que lo ejecuta — por eso hay que lanzarlo dentro del worker.
 
 Nótese que el proyecto tiene Blazer instalado, así que en cuanto exista la columna la misma
 comparación se puede guardar como panel SQL para el equipo; la tarea de rake es la versión
@@ -186,37 +213,37 @@ autocontenida que viaja con el código.
 **6 — Este documento.**
 
 ### Tests
-Enrutado: estable entre reintentos; respeta la llave maestra, la lista de plataformas y el
-porcentaje de Flipper; cae a Hypatia cuando Flipper lanza una excepción. Temporizador: no hace
+Enrutado: estable entre reintentos; respeta la llave maestra; nadie sin porcentaje, nadie al
+0 y todos al 100; la proporción observada se acerca a la configurada; subir el porcentaje sólo
+añade scrapes; la variable de plataforma gana a la global, también a 0, y la vacía cae a la
+global; un valor inválido cuenta como 0. Temporizador: no hace
 nada si está cumplido, no hace nada si se redespachó, y marca error en el resto de casos. Auth
 del callback: scrape de Hypatia sin bearer aceptado; scrape del orquestador rechazado sin él y
 aceptado con él; `ZENODOTUS_CALLBACK_REQUIRED` forzándolo para ambos. Tarea de informe: humo.
 
 ## Runbook
 
+Todo se configura en el `.env` del servidor. Después de cada cambio, volver a levantar el
+worker y comprobar lo que ve de verdad — **no `restart`**, que se queda con el entorno antiguo:
+
 ```bash
-# Una vez, antes de nada: registrar los cinco dials. Flipper avisa cada vez que le preguntan
-# por un feature que no ha visto nunca, y en el camino del scraping eso es una línea de log
-# por scrape.
-rails canary:setup
+docker compose up -d worker
+docker compose exec worker bin/rails canary:status
 ```
 
-```ruby
+```bash
 # Fase 1 — 10% en todas
-%w[twitter instagram facebook tiktok youtube].each do |p|
-  Flipper.enable_percentage_of_actors(:"orchestrator_canary_#{p}", 10)
-end
+ORCHESTRATOR_CANARY_PERCENT=10
 
-# Fase 2 — una plataforma, entera
-Flipper.enable_percentage_of_actors(:orchestrator_canary_twitter, 100)
-%w[instagram facebook tiktok youtube].each do |p|
-  Flipper.disable(:"orchestrator_canary_#{p}")
-end
+# Fase 2 — una plataforma entera, el resto apagado
+ORCHESTRATOR_CANARY_PERCENT=0
+ORCHESTRATOR_CANARY_PERCENT_TWITTER=100
 
-# Parar todo, de inmediato, sin desplegar
-%w[twitter instagram facebook tiktok youtube].each do |p|
-  Flipper.disable(:"orchestrator_canary_#{p}")
-end
+# Fase 3 — todas (y quitar las variables por plataforma, que ganarían a la global)
+ORCHESTRATOR_CANARY_PERCENT=100
+
+# Parar todo: una sola variable, gana a cualquier porcentaje
+USE_ORCHESTRATOR=false
 ```
 
 Antes de la fase 1, y en este orden: poner `ZENODOTUS_CALLBACK_TOKEN` **primero** en el Secret
@@ -234,28 +261,34 @@ los contenedores (`docs/TESTING.md`) y luego `rails db:setup`.
 ### ¿A dónde va un scrape?
 
 ```ruby
-# rails console, con USE_ORCHESTRATOR=true y MITROPOULOS_URL apuntando a cualquier cosa
+# rails console, con USE_ORCHESTRATOR=true y MITROPOULOS_URL apuntando a cualquier cosa.
+# El porcentaje se lee en cada scrape, así que en la consola se cambia en caliente; en el
+# worker, en cambio, hay que volver a levantarlo.
 def goes_to(type)
   s = Scrape.create!(url: "https://example.com/#{SecureRandom.hex(4)}", scrape_type: type)
   s.assign_backend!
   s.backend
 end
 
-goes_to("instagram")                                                   # => "hypatia" (dial cerrado)
-Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
-goes_to("instagram")                                                   # => "orchestrator"
-goes_to("twitter")                                                     # => "hypatia" (tiene su propio dial)
+goes_to("instagram")                                   # => "hypatia" (sin porcentaje, nadie)
+ENV["ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM"] = "100"
+goes_to("instagram")                                   # => "orchestrator"
+goes_to("twitter")                                     # => "hypatia" (su variable no está puesta)
 
-# Al 30%, aproximadamente tres de cada diez:
-Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 30)
-40.times.map { goes_to("instagram") }.tally                            # => {"hypatia"=>31, "orchestrator"=>9}
+# Al 30%, aproximadamente tres de cada diez (varía en cada ejecución):
+ENV["ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM"] = "30"
+200.times.map { goes_to("instagram") }.tally           # => {"hypatia"=>~140, "orchestrator"=>~60}
 
-# Y un scrape no se mueve nunca, por mucho que el dial se mueva debajo:
+# Una errata cae hacia Hypatia, no hacia el orquestador:
+ENV["ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM"] = "30%"
+goes_to("instagram")                                   # => "hypatia", y un error en el log
+
+# Y un scrape no se mueve nunca, por mucho que cambie el porcentaje debajo:
+ENV["ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM"] = "100"
 s = Scrape.create!(url: "https://example.com/stable", scrape_type: :instagram)
-Flipper.enable_percentage_of_actors(:orchestrator_canary_instagram, 100)
-s.assign_backend!                                    # "orchestrator"
-Flipper.disable(:orchestrator_canary_instagram)
-s.assign_backend!                                    # sigue siendo "orchestrator"
+s.assign_backend!                                      # "orchestrator"
+ENV["ORCHESTRATOR_CANARY_PERCENT_INSTAGRAM"] = "0"
+s.assign_backend!                                      # sigue siendo "orchestrator"
 ```
 
 ### ¿El callback rechaza de verdad?
