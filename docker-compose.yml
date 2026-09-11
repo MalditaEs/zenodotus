@@ -45,6 +45,22 @@ services:
       KEY_ENCRYPTION_SALT: ${KEY_ENCRYPTION_SALT}
       HYPATIA_SERVER_URL: ${HYPATIA_SERVER_URL}
       HYPATIA_AUTH_KEY: ${HYPATIA_AUTH_KEY}
+      # MV-6 orchestrator (Mitropoulos) cutover — off unless USE_ORCHESTRATOR=true.
+      # The orchestrator authenticates callers through Keycloak: we hold a confidential
+      # client there and exchange its id + secret for a short-lived token (MitropoulosToken).
+      USE_ORCHESTRATOR: ${USE_ORCHESTRATOR:-false}
+      MITROPOULOS_URL: ${MITROPOULOS_URL:-}
+      MITROPOULOS_TOKEN_URL: ${MITROPOULOS_TOKEN_URL:-}
+      MITROPOULOS_CLIENT_ID: ${MITROPOULOS_CLIENT_ID:-}
+      MITROPOULOS_CLIENT_SECRET: ${MITROPOULOS_CLIENT_SECRET:-}
+      MITROPOULOS_AUTH_KEY: ${MITROPOULOS_AUTH_KEY:-}   # dev only: static bearer, overrides Keycloak
+      # Inbound half of the same link: the shared secret the orchestrator must present on
+      # /media_vault/archive/scrape_result_callback. Unset ⇒ the callback stays open, which is
+      # what legacy Hypatia needs. Set it only once nothing but the orchestrator calls back.
+      ZENODOTUS_CALLBACK_TOKEN: ${ZENODOTUS_CALLBACK_TOKEN:-}
+      # Demand it on every callback rather than only on scrapes routed to the orchestrator.
+      # For after the cutover; during the canary it would 401 Hypatia's callbacks.
+      ZENODOTUS_CALLBACK_REQUIRED: ${ZENODOTUS_CALLBACK_REQUIRED:-}
       AUTH_BASE_HOST: ${AUTH_BASE_HOST}
       MAIL_DOMAIN: ${MAIL_DOMAIN}
       MAILGUN_API_KEY: ${MAILGUN_API_KEY}
@@ -105,6 +121,14 @@ services:
       NEO4J_PASSWORD: password
       MALLOC_ARENA_MAX: "2"
       RUN_MIGRATIONS: "false"
+      # MV-6 canary. Routing is decided here, in the worker -- ScrapeJob is the only caller of
+      # Scrape#perform -- so this is the process that has to see these; web never reads them.
+      # After changing them run `docker compose up -d worker`: `restart` keeps the environment
+      # the container was created with. Per-platform overrides
+      # (ORCHESTRATOR_CANARY_PERCENT_TWITTER, ...) arrive through env_file.
+      USE_ORCHESTRATOR: ${USE_ORCHESTRATOR:-false}
+      MITROPOULOS_URL: ${MITROPOULOS_URL:-}
+      ORCHESTRATOR_CANARY_PERCENT: ${ORCHESTRATOR_CANARY_PERCENT:-0}
       # S3 / Shrine
       AWS_REGION: ${AWS_REGION}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}

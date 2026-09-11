@@ -17,6 +17,17 @@ class Scrape < ApplicationRecord
 
   enum initiated_from: [ "site", "plugin", "media_review" ]
 
+  # Which system this scrape was handed to. Set once, in `assign_backend!`.
+  enum backend: { hypatia: "hypatia", orchestrator: "orchestrator" }, _prefix: :via
+
+  # Platforms the orchestrator can archive. Anything outside this list stays on Hypatia
+  # regardless of the canary dials.
+  ORCHESTRATOR_SCRAPE_TYPES = %w[twitter instagram facebook tiktok youtube].freeze
+
+  # How long the orchestrator gets to call back before we give up on it. Its own polling
+  # ceiling is 20 minutes (`poll_max_minutes`), so this is that plus slack.
+  CALLBACK_TIMEOUT = 30.minutes
+
   has_one :archive_item, dependent: :destroy
   belongs_to :media_review, dependent: nil, optional: true
   belongs_to :user, optional: true
@@ -30,35 +41,139 @@ class Scrape < ApplicationRecord
     ScrapeJob.perform_later(self)
   end
 
-  # Make the call to Hypatia, the return should be { success: "true" } after parsing
-  # This does it synchronously. If you're calling this you probably mean to call `enqueue`
+  # Kicks the scrape off synchronously (you probably want `enqueue`). The return is the
+  # parsed server response ({ success: true } from Hypatia; the ack from the orchestrator).
+  # `assign_backend!` decides which of the two this scrape belongs to and remembers the
+  # answer, so a retry goes back to the same place.
+  # Either way the response handling is identical: a 400 {code:10} means the url is
+  # unsupported (mark removed, don't retry); any other non-2xx is an error we retry.
   sig { returns(Hash) }
   def perform
-    params = { url: { auth_key: Figaro.env.HYPATIA_AUTH_KEY, url: self.url, callback_id: self.id } }
+    assign_backend!
+    response = via_orchestrator? ? perform_via_orchestrator : perform_via_hypatia
 
-    # Move this to the Scrape model so they're easily resubmittable
-    response = Typhoeus.get(
-      Figaro.env.HYPATIA_SERVER_URL,
-      followlocation: true,
-      params: params,
-      ssl_verifypeer: false,
-      ssl_verifyhost: 0
-    )
-
-    json_error_response = JSON.parse(response.body)
-    if response.code != 200
-      if response.code == 400 && json_error_response.nil? == false && json_error_response["code"] == 10
+    if (200..299).exclude?(response.code)
+      json_error_response = JSON.parse(response.body) rescue nil
+      if response.code == 400 && json_error_response.is_a?(Hash) && json_error_response["code"] == 10
         logger.info("Marking: #{self.url} as removed. 🦕")
         # The url is not valid, so we should mark it as removed
         self.fulfill([{ status: "removed" }])
         # We don't raise because we don't want it to retry.
       else
         self.mark_error
-        raise Scrape::ExternalServerError.new("Error: #{response.code} returned from Hypatia server.")
+        raise Scrape::ExternalServerError.new("Error: #{response.code} returned from scrape server.")
       end
     end
 
     JSON.parse(response.body)
+  end
+
+  # Decide once where this scrape goes, and record when we last handed it over.
+  #
+  # The decision has to survive a Sidekiq retry. If the dice were re-rolled on every attempt
+  # a scrape could go to the orchestrator first and Hypatia second, and the canary would be
+  # measuring its own routing rather than either backend. `dispatched_at` does move on every
+  # attempt -- the callback timeout is relative to the last dispatch, not the first.
+  sig { void }
+  def assign_backend!
+    self.backend ||= choose_backend
+    update_columns(backend: backend, dispatched_at: Time.current)
+  end
+
+  # Two levels of switch, per docs/MV6-CANARY.md, both of them environment variables:
+  #
+  #   USE_ORCHESTRATOR=true                     master switch; anything else sends everything to Hypatia
+  #   ORCHESTRATOR_CANARY_PERCENT=10            share of scrapes routed to the orchestrator
+  #   ORCHESTRATOR_CANARY_PERCENT_TWITTER=100   per-platform override of that share
+  #
+  # They are read here, and `perform` only ever runs in the Sidekiq worker (ScrapeJob), so the
+  # worker is the process that has to see them. Changing them means `docker compose up -d
+  # worker`: a plain `restart` keeps the environment the container was created with.
+  #
+  # The bucket is a hash of the scrape's id rather than a random draw, so the same scrape always
+  # gets the same answer and raising the percentage only ever adds scrapes. `assign_backend!`
+  # persists the decision regardless, so a new value only affects scrapes performed after the
+  # worker picks it up.
+  sig { returns(String) }
+  def choose_backend
+    return "hypatia" unless orchestrator_available?
+    return "hypatia" unless ORCHESTRATOR_SCRAPE_TYPES.include?(scrape_type)
+
+    Zlib.crc32(self.id.to_s) % 100 < canary_percent ? "orchestrator" : "hypatia"
+  end
+
+  # The share of this scrape's platform that goes to the orchestrator, from 0 to 100.
+  #
+  # The platform's own variable wins when it is set, even to 0, so one platform can be shut
+  # while the rest run. An empty one counts as unset, which is what `${VAR:-}` in docker-compose
+  # produces. Anything that is not a whole number from 0 to 100 counts as 0: a typo like "10%"
+  # or "150" has to fail towards Hypatia, never towards routing everything to the orchestrator.
+  sig { returns(Integer) }
+  def canary_percent
+    platform_variable = "ORCHESTRATOR_CANARY_PERCENT_#{scrape_type.to_s.upcase}"
+    variable = ENV[platform_variable].present? ? platform_variable : "ORCHESTRATOR_CANARY_PERCENT"
+    raw = ENV[variable]
+    return 0 if raw.blank?
+
+    value = Integer(raw, 10, exception: false)
+    return value if value && (0..100).cover?(value)
+
+    logger.error("#{variable}=#{raw.inspect} is not a whole number from 0 to 100; routing to Hypatia.")
+    0
+  end
+
+  sig { returns(T::Boolean) }
+  def orchestrator_available?
+    Figaro.env.USE_ORCHESTRATOR == "true" && Figaro.env.MITROPOULOS_URL.present?
+  end
+
+  # Legacy path: GET Hypatia with nested `url[...]` params.
+  def perform_via_hypatia
+    params = { url: { auth_key: Figaro.env.HYPATIA_AUTH_KEY, url: self.url, callback_id: self.id } }
+    Typhoeus.get(
+      Figaro.env.HYPATIA_SERVER_URL,
+      followlocation: true,
+      params: params,
+      ssl_verifypeer: false,
+      ssl_verifyhost: 0
+    )
+  end
+
+  # MV-6 path: POST JSON to the orchestrator. It answers 202 (queued) and later calls back
+  # the same archive#scrape_result_callback endpoint, and reproduces the 400 {code:10}
+  # unsupported-url contract, so the handling in `perform` is unchanged. callback_id is sent
+  # as a string (the orchestrator echoes it back verbatim in the callback).
+  #
+  # The orchestrator requires a Keycloak bearer (see MitropoulosToken). A 401 means the
+  # cached token was revoked or expired in flight: mint a fresh one and try exactly once
+  # more, so a routine key rotation never costs a scrape.
+  def perform_via_orchestrator
+    response = post_to_orchestrator
+    if response.code == 401 && MitropoulosToken.configured?
+      MitropoulosToken.reset!
+      response = post_to_orchestrator
+    end
+    # It answered 202 and will call back later -- or it won't, and nothing else would ever
+    # notice. Arm the timeout on the way out.
+    ScrapeTimeoutJob.set(wait: CALLBACK_TIMEOUT).perform_later(self) if (200..299).cover?(response.code)
+    response
+  rescue MitropoulosToken::Error => e
+    # Same treatment as any other failure to reach the scrape server: mark it and let the
+    # job retry. Keycloak being down is transient; a wrong secret is not, and the message
+    # says which.
+    self.mark_error
+    raise Scrape::ExternalServerError.new("Error: no orchestrator token: #{e.message}")
+  end
+
+  def post_to_orchestrator
+    headers = { "Content-Type" => "application/json" }
+    bearer = MitropoulosToken.bearer
+    headers["Authorization"] = "Bearer #{bearer}" if bearer.present?
+    Typhoeus.post(
+      "#{Figaro.env.MITROPOULOS_URL.chomp('/')}/scrape",
+      headers: headers,
+      body: { url: self.url, callback_id: self.id.to_s }.to_json
+    )
   end
 
   sig { void }
@@ -143,6 +258,7 @@ class Scrape < ApplicationRecord
     Honeybadger.notify(e, context: {
       id: self.id,
       url: self.url,
+      backend: self.backend,
       response: response
     })
   end
